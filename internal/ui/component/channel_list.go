@@ -3,6 +3,7 @@ package component
 import (
 	"fmt"
 	"io"
+	"log/slog"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
@@ -156,6 +157,14 @@ func (c *ChannelList) applyFilter() {
 	ordered := make([]slack.Channel, 0, len(channels))
 	ordered = append(ordered, unread...)
 	ordered = append(ordered, read...)
+
+	slog.Debug("channel list applyFilter",
+		"total_input", len(c.allChannels),
+		"unread_only", c.unreadOnly,
+		"after_filter", len(channels),
+		"unread", len(unread),
+		"read", len(read),
+	)
 
 	items := make([]list.Item, len(ordered))
 	for i, ch := range ordered {

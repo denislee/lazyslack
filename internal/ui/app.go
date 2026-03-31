@@ -1,10 +1,10 @@
 package ui
 
 import (
+	"log/slog"
 	"time"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -45,13 +45,10 @@ func NewApp(client *slack.Client, cfg *config.Config) *App {
 	formatter := slack.NewFormatter(client.Cache(), cfg.Display.TimestampFormat)
 	uiState := config.LoadUIState()
 
-	channelsScreen := screen.NewChannelsScreen(client, screen.ChannelsConfig{
-		Types:      cfg.Channels.Types,
-		UnreadOnly: uiState.UnreadOnly,
-	})
+	mentionsScreen := screen.NewMentionsScreen(client, formatter)
 
 	app := &App{
-		stack:          []Screen{channelsScreen},
+		stack:          []Screen{mentionsScreen},
 		sidebarVisible: uiState.SidebarVisible,
 		client:         client,
 		formatter:      formatter,
@@ -62,22 +59,19 @@ func NewApp(client *slack.Client, cfg *config.Config) *App {
 }
 
 func (a *App) saveUIState() {
-	unreadOnly := false
-	if cs, ok := a.stack[0].(*screen.ChannelsScreen); ok {
-		unreadOnly = cs.IsUnreadOnly()
-	}
 	config.SaveUIState(config.UIState{
 		SidebarVisible: a.sidebarVisible,
-		UnreadOnly:     unreadOnly,
 	})
 }
 
 func (a *App) Init() tea.Cmd {
+	slog.Info("app init", "poll_channel_list", a.config.Polling.ChannelList, "poll_active", a.config.Polling.ActiveChannel)
 	var cmds []tea.Cmd
 	if len(a.stack) > 0 {
 		cmds = append(cmds, a.stack[0].Init())
 	}
 	cmds = append(cmds, a.startChannelListPolling())
+	cmds = append(cmds, a.startMentionsPolling())
 	// Fetch usergroups in background for resolving <!subteam^...> mentions
 	cmds = append(cmds, func() tea.Msg {
 		_, _ = a.client.GetUserGroups()
@@ -103,10 +97,6 @@ func (a *App) popScreen() {
 	if len(a.stack) > 1 {
 		a.stack = a.stack[:len(a.stack)-1]
 		a.resizeScreens()
-		// Reset filter on the channel list when returning to it
-		if channelsScreen, ok := a.activeScreen().(*screen.ChannelsScreen); ok {
-			channelsScreen.ResetFilter()
-		}
 	}
 }
 
@@ -162,8 +152,6 @@ func (a *App) isScreenInInsertMode() bool {
 		return s.InInsertMode()
 	case *screen.SearchScreen:
 		return true // search always has text input active
-	case *screen.ChannelsScreen:
-		return s.FilterState() == list.Filtering
 	}
 	return false
 }
@@ -229,14 +217,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		// Global search (skip when sidebar is focused so / can filter the channel list)
-		if a.sidebarFocus != focusSidebar {
-			if key.Matches(msg, key.NewBinding(key.WithKeys("/"))) {
-				if _, isSearch := a.activeScreen().(*screen.SearchScreen); !isSearch {
-					searchScreen := screen.NewSearchScreen(a.client, a.formatter)
-					return a, a.pushScreen(searchScreen)
-				}
+		// Global search
+		if key.Matches(msg, key.NewBinding(key.WithKeys("/"))) && !a.isScreenInInsertMode() {
+			if _, isSearch := a.activeScreen().(*screen.SearchScreen); !isSearch {
+				searchScreen := screen.NewSearchScreen(a.client, a.formatter)
+				return a, a.pushScreen(searchScreen)
 			}
+		}
+
+		// Activity screen (toggle)
+		if key.Matches(msg, key.NewBinding(key.WithKeys("a"))) && !a.isScreenInInsertMode() {
+			if _, isActivity := a.activeScreen().(*screen.ActivityScreen); isActivity {
+				a.popScreen()
+				return a, nil
+			}
+			activityScreen := screen.NewActivityScreen(a.client, a.formatter)
+			return a, a.pushScreen(activityScreen)
 		}
 
 		// Toggle sidebar layout
@@ -250,18 +246,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		// Search screen: enter opens selected result
-		if searchScreen, ok := a.activeScreen().(*screen.SearchScreen); ok {
-			if key.Matches(msg, key.NewBinding(key.WithKeys("enter"))) {
-				if r := searchScreen.SelectedResult(); r != nil {
-					for len(a.stack) > 1 {
-						a.stack = a.stack[:len(a.stack)-1]
-					}
-					chatScreen := screen.NewChatScreen(a.client, a.formatter, r.ChannelID, "#"+r.ChannelName)
-					cmd := a.pushScreen(chatScreen)
-					pollCmd := a.startChannelPolling(r.ChannelID)
-					return a, tea.Batch(cmd, pollCmd)
+		// Search/Activity screen: enter opens selected result
+		if key.Matches(msg, key.NewBinding(key.WithKeys("enter"))) {
+			var r *slack.SearchResult
+			if s, ok := a.activeScreen().(*screen.SearchScreen); ok {
+				r = s.SelectedResult()
+			} else if s, ok := a.activeScreen().(*screen.ActivityScreen); ok {
+				r = s.SelectedResult()
+			}
+			if r != nil {
+				for len(a.stack) > 1 {
+					a.stack = a.stack[:len(a.stack)-1]
 				}
+				chatScreen := screen.NewChatScreen(a.client, a.formatter, r.ChannelID, "#"+r.ChannelName)
+				cmd := a.pushScreen(chatScreen)
+				pollCmd := a.startChannelPolling(r.ChannelID)
+				return a, tea.Batch(cmd, pollCmd)
 			}
 		}
 
@@ -317,10 +317,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
-	case screen.UnreadToggleMsg:
-		a.saveUIState()
-		return a, nil
-
 	case screen.OpenThreadMsg:
 		threadScreen := screen.NewThreadScreen(a.client, a.formatter, msg.ChannelID, msg.ChannelName, msg.ThreadTS, msg.ParentMsg)
 		cmd := a.pushScreen(threadScreen)
@@ -351,6 +347,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.handlePollTick(msg)
 
 	case pollResultMsg:
+		slog.Debug("poll result", "channel", msg.channelID, "messages", len(msg.messages))
 		chatScreen := a.findChatScreen(msg.channelID)
 		if chatScreen != nil {
 			chatScreen.SetMessages(msg.messages)
@@ -358,6 +355,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Only mark as read if the chat screen is the active (top) screen
 		if chatScreen != nil && a.activeScreen() == chatScreen && len(msg.messages) > 0 {
 			latestTS := msg.messages[len(msg.messages)-1].Timestamp
+			slog.Debug("marking channel as read", "channel", msg.channelID, "ts", latestTS)
 			markCmd := func() tea.Msg {
 				_ = a.client.MarkChannel(msg.channelID, latestTS)
 				return nil
@@ -371,10 +369,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if threadScreen == nil {
 			return a, nil
 		}
+		slog.Debug("thread poll tick", "channel", msg.channelID, "thread", msg.threadTS)
 		fetchCmd := func() tea.Msg {
 			msgs, err := a.client.GetThreadReplies(msg.channelID, msg.threadTS)
 			if err != nil {
-				return pollErrorMsg{err: err}
+				return pollErrorMsg{err: err, source: "thread"}
 			}
 			return threadPollResultMsg{channelID: msg.channelID, threadTS: msg.threadTS, messages: msgs}
 		}
@@ -388,10 +387,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case channelListPollTickMsg:
+		slog.Debug("channel list poll tick fired")
 		fetchCmd := func() tea.Msg {
 			channels, err := a.client.GetChannels(a.config.Channels.Types)
 			if err != nil {
-				return pollErrorMsg{err: err}
+				slog.Error("channel list poll fetch failed", "error", err)
+				return pollErrorMsg{err: err, source: "channel_list"}
 			}
 			return channelListRefreshMsg{channels: channels}
 		}
@@ -399,11 +400,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(fetchCmd, nextPoll)
 
 	case channelListRefreshMsg:
-		// Update channel list screen (always the first screen in the stack)
-		if channelsScreen, ok := a.stack[0].(*screen.ChannelsScreen); ok {
-			channelsScreen.SetChannels(msg.channels)
-			channelsScreen.SetLastPoll(time.Now())
+		unreadCount := 0
+		for _, ch := range msg.channels {
+			if ch.UnreadCount > 0 {
+				unreadCount++
+			}
 		}
+		slog.Info("channel list refreshed", "total", len(msg.channels), "with_unread", unreadCount)
 		// Update unread count on chat screen if active
 		if chatScreen, ok := a.activeScreen().(*screen.ChatScreen); ok {
 			total := 0
@@ -416,8 +419,32 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case mentionsPollTickMsg:
+		slog.Debug("mentions poll tick fired")
+		fetchCmd := func() tea.Msg {
+			results, err := a.client.Search("to:me")
+			if err != nil {
+				slog.Error("mentions poll fetch failed", "error", err)
+				return pollErrorMsg{err: err, source: "mentions"}
+			}
+			return mentionsRefreshMsg{results: results}
+		}
+		nextPoll := a.startMentionsPolling()
+		return a, tea.Batch(fetchCmd, nextPoll)
+
+	case mentionsRefreshMsg:
+		slog.Info("mentions refreshed", "count", len(msg.results))
+		if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
+			ms.SetMentions(msg.results)
+			ms.SetLastPoll(time.Now())
+		}
+		return a, nil
+
 	case pollErrorMsg:
-		// Silently ignore poll errors, will retry on next tick
+		slog.Error("poll error", "source", msg.source, "error", msg.err)
+		if ms, ok := a.stack[0].(*screen.MentionsScreen); ok && msg.source == "mentions" {
+			ms.SetPollError(msg.err)
+		}
 		return a, nil
 	}
 
@@ -430,31 +457,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.resizeScreens()
 				return a, nil
 			}
+
 			// Remember selection before update
 			var prevChannelID string
-			if cs, ok := a.stack[0].(*screen.ChannelsScreen); ok {
-				if ch := cs.SelectedChannel(); ch != nil {
-					prevChannelID = ch.ID
-				}
+			if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
+				prevChannelID = ms.SelectedChannelID()
 			}
 
 			newScreen, cmd := a.stack[0].Update(msg)
 			a.stack[0] = newScreen
 
-			// Auto-load channel when cursor moves to a different one (skip during filtering)
-			if cs, ok := a.stack[0].(*screen.ChannelsScreen); ok {
-				if cs.FilterState() != list.Filtering {
-					if ch := cs.SelectedChannel(); ch != nil && ch.ID != prevChannelID {
-						a.stack = a.stack[:1]
-						prefix := "#"
-						if ch.IsIM {
-							prefix = "@"
-						}
-						chatScreen := screen.NewChatScreen(a.client, a.formatter, ch.ID, prefix+ch.Name)
-						initCmd := a.pushScreen(chatScreen)
-						pollCmd := a.startChannelPolling(ch.ID)
-						return a, tea.Batch(cmd, initCmd, pollCmd)
-					}
+			// Auto-load channel when cursor moves to a different mention
+			if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
+				if newID := ms.SelectedChannelID(); newID != "" && newID != prevChannelID {
+					r := ms.SelectedResult()
+					a.stack = a.stack[:1]
+					chatScreen := screen.NewChatScreen(a.client, a.formatter, r.ChannelID, "#"+r.ChannelName)
+					initCmd := a.pushScreen(chatScreen)
+					pollCmd := a.startChannelPolling(r.ChannelID)
+					return a, tea.Batch(cmd, initCmd, pollCmd)
 				}
 			}
 
@@ -527,7 +548,8 @@ type pollResultMsg struct {
 }
 
 type pollErrorMsg struct {
-	err error
+	err    error
+	source string // "channel_list", "channel", "thread"
 }
 
 type threadPollTickMsg struct {
@@ -547,9 +569,21 @@ type channelListRefreshMsg struct {
 	channels []slack.Channel
 }
 
+type mentionsPollTickMsg struct{}
+
+type mentionsRefreshMsg struct {
+	results []slack.SearchResult
+}
+
 func (a *App) startChannelListPolling() tea.Cmd {
 	return tea.Tick(a.config.Polling.ChannelList, func(t time.Time) tea.Msg {
 		return channelListPollTickMsg{}
+	})
+}
+
+func (a *App) startMentionsPolling() tea.Cmd {
+	return tea.Tick(a.config.Polling.ChannelList, func(t time.Time) tea.Msg {
+		return mentionsPollTickMsg{}
 	})
 }
 
@@ -590,13 +624,15 @@ func (a *App) handlePollTick(msg pollTickMsg) (tea.Model, tea.Cmd) {
 	// (it may be beneath a ThreadScreen)
 	chatScreen := a.findChatScreen(msg.channelID)
 	if chatScreen == nil {
+		slog.Debug("poll tick ignored, no chat screen", "channel", msg.channelID)
 		return a, nil
 	}
 
+	slog.Debug("channel poll tick", "channel", msg.channelID)
 	fetchCmd := func() tea.Msg {
 		msgs, err := a.client.GetMessages(msg.channelID, 50, "")
 		if err != nil {
-			return pollErrorMsg{err: err}
+			return pollErrorMsg{err: err, source: "channel"}
 		}
 		return pollResultMsg{channelID: msg.channelID, messages: msgs}
 	}

@@ -112,6 +112,14 @@ func (s *ThreadScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		s.messageList.PageDown()
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+u", "ctrl+b", "pgup"))):
 		s.messageList.PageUp()
+	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+		focused := s.messageList.FocusedMessage()
+		if focused != nil {
+			if urls := slack.ExtractURLs(focused.Text); len(urls) > 0 {
+				_ = openBrowser(urls[0])
+			}
+		}
+		return s, nil
 	case key.Matches(msg, key.NewBinding(key.WithKeys("i"))):
 		s.focus = focusComposer
 		return s, s.composer.Focus()
@@ -207,6 +215,7 @@ func (s *ThreadScreen) ShortHelp() []key.Binding {
 	return []key.Binding{
 		key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "reply")),
 		key.NewBinding(key.WithKeys("j/k"), key.WithHelp("j/k", "navigate")),
+		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open link")),
 		key.NewBinding(key.WithKeys("escape", "ctrl+[", "h"), key.WithHelp("esc/h", "back")),
 	}
 }

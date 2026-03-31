@@ -3,78 +3,64 @@ package screen
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/user/lazyslack/internal/slack"
 )
 
-type SearchScreen struct {
-	input     textinput.Model
+type ActivityScreen struct {
 	results   []slack.SearchResult
 	cursor    int
 	client    *slack.Client
 	formatter *slack.Formatter
-	query     string
 	loading   bool
 	err       string
 	width     int
 	height    int
-	lastQuery string
-	debounce  time.Time
 }
 
-type JumpToChannelMsg struct {
-	ChannelID   string
-	ChannelName string
-	MessageTS   string
-}
-
-func NewSearchScreen(client *slack.Client, formatter *slack.Formatter) *SearchScreen {
-	ti := textinput.New()
-	ti.Placeholder = "Search messages..."
-	ti.Focus()
-	ti.SetWidth(60)
-
-	return &SearchScreen{
-		input:     ti,
+func NewActivityScreen(client *slack.Client, formatter *slack.Formatter) *ActivityScreen {
+	return &ActivityScreen{
 		client:    client,
 		formatter: formatter,
+		loading:   true,
 	}
 }
 
-func (s *SearchScreen) Init() tea.Cmd {
-	return textinput.Blink
-}
-
-type searchResultsMsg struct {
-	query   string
+type activityResultsMsg struct {
 	results []slack.SearchResult
 }
 
-type searchErrorMsg struct {
+type activityErrorMsg struct {
 	err error
 }
 
-func (s *SearchScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
+func (s *ActivityScreen) Init() tea.Cmd {
+	return func() tea.Msg {
+		results, err := s.client.Search("to:me")
+		if err != nil {
+			return activityErrorMsg{err: err}
+		}
+		return activityResultsMsg{results: results}
+	}
+}
+
+func (s *ActivityScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		s.SetSize(msg.Width, msg.Height)
 		return s, nil
 
-	case searchResultsMsg:
-		if msg.query == strings.TrimSpace(s.input.Value()) {
-			s.results = msg.results
-			s.loading = false
-			s.cursor = 0
-		}
+	case activityResultsMsg:
+		s.results = msg.results
+		s.loading = false
+		s.cursor = 0
 		return s, nil
 
-	case searchErrorMsg:
+	case activityErrorMsg:
 		s.err = msg.err.Error()
 		s.loading = false
 		return s, nil
@@ -95,64 +81,70 @@ func (s *SearchScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 					}
 				}
 			}
-			// Trigger search on enter if no results yet
-			query := strings.TrimSpace(s.input.Value())
-			if len(query) >= 2 {
-				s.lastQuery = query
-				s.loading = true
-				return s, func() tea.Msg {
-					results, err := s.client.Search(query)
-					if err != nil {
-						return searchErrorMsg{err: err}
-					}
-					return searchResultsMsg{query: query, results: results}
-				}
-			}
 			return s, nil
 
-		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+n", "down"))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("j", "down", "ctrl+n"))):
 			if s.cursor < len(s.results)-1 {
 				s.cursor++
 			}
 			return s, nil
 
-		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+p", "up"))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("k", "up", "ctrl+p"))):
 			if s.cursor > 0 {
 				s.cursor--
 			}
 			return s, nil
-		}
-	}
 
-	var cmd tea.Cmd
-	s.input, cmd = s.input.Update(msg)
-
-	// Debounced search
-	query := strings.TrimSpace(s.input.Value())
-	if query != s.lastQuery && len(query) >= 2 {
-		s.lastQuery = query
-		s.loading = true
-		searchFn := func() tea.Msg {
-			results, err := s.client.Search(query)
-			if err != nil {
-				return searchErrorMsg{err: err}
+		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+d", "ctrl+f", "pgdown"))):
+			page := (s.height - 3) / 4
+			if page < 1 {
+				page = 1
 			}
-			return searchResultsMsg{query: query, results: results}
+			s.cursor += page
+			if s.cursor >= len(s.results) {
+				s.cursor = len(s.results) - 1
+			}
+			return s, nil
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+u", "ctrl+b", "pgup"))):
+			page := (s.height - 3) / 4
+			if page < 1 {
+				page = 1
+			}
+			s.cursor -= page
+			if s.cursor < 0 {
+				s.cursor = 0
+			}
+			return s, nil
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("g"))):
+			s.cursor = 0
+			return s, nil
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("G"))):
+			if len(s.results) > 0 {
+				s.cursor = len(s.results) - 1
+			}
+			return s, nil
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("r"))):
+			s.loading = true
+			s.results = nil
+			return s, s.Init()
 		}
-		return s, tea.Batch(cmd, searchFn)
 	}
 
-	return s, cmd
+	return s, nil
 }
 
-func (s *SearchScreen) View() string {
+func (s *ActivityScreen) View() string {
 	var b strings.Builder
 
 	header := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("33")).
 		Padding(0, 1).
-		Render("Search")
+		Render("Activity — Mentions")
 
 	headerBar := lipgloss.NewStyle().
 		Width(s.width).
@@ -162,26 +154,25 @@ func (s *SearchScreen) View() string {
 		Render(header)
 
 	b.WriteString(headerBar + "\n")
-	b.WriteString("  " + s.input.View() + "\n\n")
 
 	if s.loading {
 		b.WriteString(lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240")).
-			Padding(0, 2).
-			Render("Searching..."))
+			Padding(1, 2).
+			Render("Loading activity..."))
 	} else if s.err != "" {
 		b.WriteString(lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196")).
-			Padding(0, 2).
+			Padding(1, 2).
 			Render("Error: " + s.err))
-	} else if len(s.results) == 0 && s.lastQuery != "" {
+	} else if len(s.results) == 0 {
 		b.WriteString(lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240")).
-			Padding(0, 2).
-			Render("No results"))
+			Padding(1, 2).
+			Render("No mentions found"))
 	} else {
-		itemHeight := 4
-		availHeight := s.height - 5 // header + border + input + blank
+		itemHeight := 4 // each result takes ~4 lines
+		availHeight := s.height - 3 // header + border
 		visible := availHeight / itemHeight
 		if visible < 1 {
 			visible = 1
@@ -233,6 +224,7 @@ func (s *SearchScreen) View() string {
 			b.WriteString(line + "\n")
 		}
 
+		// Position indicator
 		b.WriteString(lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240")).
 			Padding(0, 2).
@@ -242,23 +234,23 @@ func (s *SearchScreen) View() string {
 	return b.String()
 }
 
-func (s *SearchScreen) SetSize(w, h int) {
+func (s *ActivityScreen) SetSize(w, h int) {
 	s.width = w
 	s.height = h
-	s.input.SetWidth(w - 6)
 }
 
-func (s *SearchScreen) SelectedResult() *slack.SearchResult {
+func (s *ActivityScreen) SelectedResult() *slack.SearchResult {
 	if len(s.results) > 0 && s.cursor < len(s.results) {
 		return &s.results[s.cursor]
 	}
 	return nil
 }
 
-func (s *SearchScreen) ShortHelp() []key.Binding {
+func (s *ActivityScreen) ShortHelp() []key.Binding {
 	return []key.Binding{
-		key.NewBinding(key.WithKeys("enter", "l"), key.WithHelp("enter/l", "go to")),
-		key.NewBinding(key.WithKeys("ctrl+n/p"), key.WithHelp("ctrl+n/p", "navigate")),
-		key.NewBinding(key.WithKeys("escape", "ctrl+["), key.WithHelp("esc", "back")),
+		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
+		key.NewBinding(key.WithKeys("j/k"), key.WithHelp("j/k", "navigate")),
+		key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		key.NewBinding(key.WithKeys("escape"), key.WithHelp("esc", "back")),
 	}
 }

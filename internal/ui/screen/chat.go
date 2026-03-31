@@ -179,7 +179,16 @@ func (s *ChatScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
 		focused := s.messageList.FocusedMessage()
-		if focused != nil && focused.ReplyCount > 0 {
+		if focused == nil {
+			return s, nil
+		}
+		// If message has URLs, open the first one in the browser
+		if urls := slack.ExtractURLs(focused.Text); len(urls) > 0 {
+			_ = openBrowser(urls[0])
+			return s, nil
+		}
+		// Otherwise open thread if it has replies
+		if focused.ReplyCount > 0 {
 			threadTS := focused.ThreadTS
 			if threadTS == "" {
 				threadTS = focused.Timestamp
@@ -317,7 +326,7 @@ func (s *ChatScreen) ShortHelp() []key.Binding {
 	return []key.Binding{
 		key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "compose")),
 		key.NewBinding(key.WithKeys("j/k"), key.WithHelp("j/k", "navigate")),
-		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "thread")),
+		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open link/thread")),
 		key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "reply")),
 		key.NewBinding(key.WithKeys("r"), key.WithHelp("r/+", "react")),
 		key.NewBinding(key.WithKeys("escape", "ctrl+["), key.WithHelp("esc", "back")),

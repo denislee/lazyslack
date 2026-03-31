@@ -56,5 +56,6 @@ type UserGroup struct {
 type SearchResult struct {
 	ChannelID   string
 	ChannelName string
+	IsIM        bool
 	Message     Message
 }

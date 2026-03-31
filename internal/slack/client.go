@@ -3,7 +3,9 @@ package slack
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 
 	slackapi "github.com/slack-go/slack"
 )
@@ -79,10 +81,13 @@ func (c *Client) Cache() *Cache {
 }
 
 func (c *Client) GetChannels(types []string) ([]Channel, error) {
+	slog.Debug("GetChannels starting", "types", types)
 	var allChannels []Channel
 	cursor := ""
+	page := 0
 
 	for {
+		page++
 		params := &slackapi.GetConversationsParameters{
 			Types:           types,
 			ExcludeArchived: true,
@@ -91,8 +96,10 @@ func (c *Client) GetChannels(types []string) ([]Channel, error) {
 		}
 		channels, nextCursor, err := c.api.GetConversations(params)
 		if err != nil {
+			slog.Error("GetChannels API error", "page", page, "error", err)
 			return nil, fmt.Errorf("get conversations: %w", err)
 		}
+		slog.Debug("GetChannels page fetched", "page", page, "count", len(channels))
 
 		for _, ch := range channels {
 			name := ch.Name
@@ -109,15 +116,13 @@ func (c *Client) GetChannels(types []string) ([]Channel, error) {
 			}
 
 			allChannels = append(allChannels, Channel{
-				ID:          ch.ID,
-				Name:        name,
-				IsIM:        ch.IsIM,
-				IsMPIM:      ch.IsMpIM,
-				IsPrivate:   ch.IsPrivate,
-				Topic:       ch.Topic.Value,
-				Purpose:     ch.Purpose.Value,
-				UnreadCount: ch.UnreadCountDisplay,
-				LastReadTS:  ch.LastRead,
+				ID:        ch.ID,
+				Name:      name,
+				IsIM:      ch.IsIM,
+				IsMPIM:    ch.IsMpIM,
+				IsPrivate: ch.IsPrivate,
+				Topic:     ch.Topic.Value,
+				Purpose:   ch.Purpose.Value,
 			})
 		}
 
@@ -127,9 +132,51 @@ func (c *Client) GetChannels(types []string) ([]Channel, error) {
 		cursor = nextCursor
 	}
 
+	slog.Info("GetChannels list fetched", "total", len(allChannels), "pages", page)
+
+	// conversations.list doesn't reliably return unread counts.
+	// Enrich with conversations.info which always includes them.
+	c.enrichWithUnreadCounts(allChannels)
+
+	unreadCount := 0
+	for _, ch := range allChannels {
+		if ch.UnreadCount > 0 {
+			unreadCount++
+		}
+	}
+	slog.Info("GetChannels done", "total", len(allChannels), "with_unread", unreadCount)
+
 	c.cache.SetChannels(allChannels)
 	_ = c.cache.SaveChannelsToDisk(allChannels) // Best-effort caching
 	return allChannels, nil
+}
+
+// enrichWithUnreadCounts calls conversations.info for each channel to get
+// reliable unread counts. Uses concurrent workers with a semaphore.
+// The slack-go library handles rate-limit retries automatically.
+func (c *Client) enrichWithUnreadCounts(channels []Channel) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 10) // 10 concurrent workers
+
+	for i := range channels {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			info, err := c.api.GetConversationInfo(&slackapi.GetConversationInfoInput{
+				ChannelID: channels[idx].ID,
+			})
+			if err != nil {
+				slog.Debug("conversations.info error", "channel", channels[idx].Name, "error", err)
+				return
+			}
+			channels[idx].UnreadCount = info.UnreadCountDisplay
+			channels[idx].LastReadTS = info.LastRead
+		}(i)
+	}
+	wg.Wait()
 }
 
 func (c *Client) GetMessages(channelID string, limit int, oldest string) ([]Message, error) {
@@ -243,9 +290,21 @@ func (c *Client) Search(query string) ([]SearchResult, error) {
 
 	results := make([]SearchResult, 0, len(msgs.Matches))
 	for _, match := range msgs.Matches {
+		channelName := match.Channel.Name
+		isIM := strings.HasPrefix(match.Channel.ID, "D")
+		// DM channel names from search are user IDs — resolve to display names
+		if isIM && strings.HasPrefix(channelName, "U") {
+			if user, err := c.ResolveUser(channelName); err == nil {
+				channelName = user.DisplayName
+				if channelName == "" {
+					channelName = user.Name
+				}
+			}
+		}
 		results = append(results, SearchResult{
 			ChannelID:   match.Channel.ID,
-			ChannelName: match.Channel.Name,
+			ChannelName: channelName,
+			IsIM:        isIM,
 			Message: Message{
 				Timestamp: match.Timestamp,
 				UserID:    match.User,

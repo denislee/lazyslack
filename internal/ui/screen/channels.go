@@ -1,6 +1,8 @@
 package screen
 
 import (
+	"fmt"
+	"log/slog"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -12,13 +14,14 @@ import (
 )
 
 type ChannelsScreen struct {
-	channelList component.ChannelList
-	statusBar   component.StatusBar
-	client      *slack.Client
-	config      ChannelsConfig
-	lastPoll    time.Time
-	width       int
-	height      int
+	channelList    component.ChannelList
+	statusBar      component.StatusBar
+	client         *slack.Client
+	config         ChannelsConfig
+	lastPoll       time.Time
+	lastUnreadCount int
+	width          int
+	height         int
 }
 
 type ChannelsConfig struct {
@@ -81,6 +84,13 @@ func (s *ChannelsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		return s, nil
 
 	case channelsDataMsg:
+		unread := 0
+		for _, ch := range msg.channels {
+			if ch.UnreadCount > 0 {
+				unread++
+			}
+		}
+		slog.Info("channels data received", "total", len(msg.channels), "with_unread", unread, "cached", msg.isCached)
 		s.channelList.SetChannels(msg.channels)
 		if msg.isCached {
 			s.statusBar.SetStatus("Loading fresh channels in background...")
@@ -90,6 +100,7 @@ func (s *ChannelsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		return s, nil
 
 	case channelsErrorMsg:
+		slog.Error("channels load error", "error", msg.err)
 		s.statusBar.SetError(msg.err.Error())
 		return s, nil
 
@@ -141,7 +152,8 @@ func (s *ChannelsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 
 func (s *ChannelsScreen) View() string {
 	if !s.lastPoll.IsZero() {
-		s.statusBar.SetStatus("polled " + s.lastPoll.Format("15:04:05"))
+		status := fmt.Sprintf("polled %s | %d unread", s.lastPoll.Format("15:04:05"), s.lastUnreadCount)
+		s.statusBar.SetStatus(status)
 	}
 	return s.channelList.View() + "\n" + s.statusBar.View()
 }
@@ -158,7 +170,18 @@ func (s *ChannelsScreen) SetSize(w, h int) {
 }
 
 func (s *ChannelsScreen) SetChannels(channels []slack.Channel) {
+	unread := 0
+	for _, ch := range channels {
+		if ch.UnreadCount > 0 {
+			unread++
+		}
+	}
+	s.lastUnreadCount = unread
 	s.channelList.SetChannels(channels)
+}
+
+func (s *ChannelsScreen) SetPollError(err error) {
+	s.statusBar.SetError("poll: " + err.Error())
 }
 
 func (s *ChannelsScreen) ResetFilter() {

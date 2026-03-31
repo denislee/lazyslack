@@ -34,7 +34,7 @@ func (f *Formatter) Format(text string) string {
 	return text
 }
 
-// FormatTimestamp converts a Slack timestamp to a human-readable time
+// FormatTimestamp converts a Slack timestamp to a human-readable time with age
 func (f *Formatter) FormatTimestamp(ts string) string {
 	parts := strings.SplitN(ts, ".", 2)
 	if len(parts) == 0 {
@@ -47,13 +47,67 @@ func (f *Formatter) FormatTimestamp(ts string) string {
 	t := time.Unix(sec, 0).Local()
 
 	now := time.Now()
+	var formatted string
 	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
-		return t.Format(f.tsFormat)
+		formatted = t.Format(f.tsFormat)
+	} else if t.Year() == now.Year() {
+		formatted = t.Format("Jan 2 " + f.tsFormat)
+	} else {
+		formatted = t.Format("Jan 2, 2006 " + f.tsFormat)
 	}
-	if t.Year() == now.Year() {
-		return t.Format("Jan 2 " + f.tsFormat)
+
+	return formatted + " (" + FormatAge(now.Sub(t)) + ")"
+}
+
+// FormatTimestampAge converts a Slack timestamp to a relative age string.
+func (f *Formatter) FormatTimestampAge(ts string) string {
+	parts := strings.SplitN(ts, ".", 2)
+	if len(parts) == 0 {
+		return ts
 	}
-	return t.Format("Jan 2, 2006 " + f.tsFormat)
+	sec, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return ts
+	}
+	return FormatAge(time.Since(time.Unix(sec, 0)))
+}
+
+// FormatAge returns a human-readable relative time string.
+func FormatAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		m := int(d.Minutes())
+		if m == 1 {
+			return "1m ago"
+		}
+		return fmt.Sprintf("%dm ago", m)
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		if h == 1 {
+			return "1h ago"
+		}
+		return fmt.Sprintf("%dh ago", h)
+	case d < 30*24*time.Hour:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "1d ago"
+		}
+		return fmt.Sprintf("%dd ago", days)
+	case d < 365*24*time.Hour:
+		months := int(d.Hours() / 24 / 30)
+		if months <= 1 {
+			return "1mo ago"
+		}
+		return fmt.Sprintf("%dmo ago", months)
+	default:
+		years := int(d.Hours() / 24 / 365)
+		if years == 1 {
+			return "1y ago"
+		}
+		return fmt.Sprintf("%dy ago", years)
+	}
 }
 
 // FormatEmoji converts a shortcode to unicode or returns :shortcode:
@@ -146,6 +200,28 @@ func (f *Formatter) resolveEmoji(text string) string {
 		}
 		return f.FormatEmoji(parts[1])
 	})
+}
+
+// ExtractURLs returns all URLs found in Slack mrkdwn text.
+func ExtractURLs(text string) []string {
+	var urls []string
+	seen := make(map[string]bool)
+
+	// <https://url|label> format
+	for _, m := range reURL.FindAllStringSubmatch(text, -1) {
+		if len(m) >= 2 && !seen[m[1]] {
+			urls = append(urls, m[1])
+			seen[m[1]] = true
+		}
+	}
+	// <https://url> format (no label)
+	for _, m := range reURLNoLabel.FindAllStringSubmatch(text, -1) {
+		if len(m) >= 2 && !seen[m[1]] {
+			urls = append(urls, m[1])
+			seen[m[1]] = true
+		}
+	}
+	return urls
 }
 
 func (f *Formatter) resolveHTMLEntities(text string) string {
