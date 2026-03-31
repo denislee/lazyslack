@@ -191,3 +191,7 @@ func (c ChannelList) View() string {
 func (c *ChannelList) FilterState() list.FilterState {
 	return c.list.FilterState()
 }
+
+func (c *ChannelList) ResetFilter() {
+	c.list.ResetFilter()
+}

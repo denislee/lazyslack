@@ -36,7 +36,11 @@ func NewMessageList(formatter *slack.Formatter, width, height int) MessageList {
 }
 
 func (m *MessageList) SetMessages(msgs []slack.Message) {
+	wasAtBottom := len(m.messages) == 0 || m.focusedIndex >= len(m.messages)-1
 	m.messages = msgs
+	if wasAtBottom && len(msgs) > 0 {
+		m.focusedIndex = len(msgs) - 1
+	}
 	if m.focusedIndex >= len(msgs) {
 		m.focusedIndex = len(msgs) - 1
 	}
@@ -44,6 +48,9 @@ func (m *MessageList) SetMessages(msgs []slack.Message) {
 		m.focusedIndex = 0
 	}
 	m.render()
+	if wasAtBottom {
+		m.viewport.GotoBottom()
+	}
 }
 
 func (m *MessageList) SetSize(w, h int) {
@@ -95,6 +102,35 @@ func (m *MessageList) GoToBottom() {
 	m.viewport.GotoBottom()
 }
 
+func (m *MessageList) PageUp() {
+	pageSize := m.height / 3
+	if pageSize < 1 {
+		pageSize = 1
+	}
+	m.focusedIndex -= pageSize
+	if m.focusedIndex < 0 {
+		m.focusedIndex = 0
+	}
+	m.render()
+	m.ensureVisible()
+}
+
+func (m *MessageList) PageDown() {
+	pageSize := m.height / 3
+	if pageSize < 1 {
+		pageSize = 1
+	}
+	m.focusedIndex += pageSize
+	if m.focusedIndex >= len(m.messages) {
+		m.focusedIndex = len(m.messages) - 1
+	}
+	if m.focusedIndex < 0 {
+		m.focusedIndex = 0
+	}
+	m.render()
+	m.ensureVisible()
+}
+
 func (m *MessageList) ScrollToBottom() {
 	if len(m.messages) > 0 {
 		m.focusedIndex = len(m.messages) - 1
@@ -126,7 +162,7 @@ func (m *MessageList) render() {
 		isSelected := i == m.focusedIndex
 		b.WriteString(m.formatMessage(&msg, isSelected))
 		if i < len(m.messages)-1 {
-			b.WriteString("\n")
+			b.WriteString("\n\n")
 		}
 	}
 	m.viewport.SetContent(b.String())
@@ -147,14 +183,19 @@ func (m *MessageList) formatMessage(msg *slack.Message, isSelected bool) string 
 
 	header := nameStyle.Render(username)
 	headerRight := timeStyle.Render(ts)
-	gap := contentWidth - lipgloss.Width(header) - lipgloss.Width(headerRight)
+	lineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("237"))
+	gap := contentWidth - lipgloss.Width(header) - lipgloss.Width(headerRight) - 2
 	if gap < 1 {
 		gap = 1
 	}
-	headerLine := header + strings.Repeat(" ", gap) + headerRight
+	headerLine := header + " " + lineStyle.Render(strings.Repeat("─", gap)) + " " + headerRight
 
-	// Body
-	body := m.formatter.Format(msg.Text)
+	// Body (collapse double newlines, word-wrapped to fit content width)
+	bodyText := m.formatter.Format(msg.Text)
+	for strings.Contains(bodyText, "\n\n") {
+		bodyText = strings.ReplaceAll(bodyText, "\n\n", "\n")
+	}
+	body := lipgloss.NewStyle().Width(contentWidth).Render(bodyText)
 
 	var lines []string
 	lines = append(lines, headerLine)
@@ -208,24 +249,26 @@ func (m *MessageList) ensureVisible() {
 		return
 	}
 
+	// Count lines from the rendered content to get exact positions
 	focusStartLine := 0
 	for i := 0; i < m.focusedIndex; i++ {
-		msgStr := m.formatMessage(&m.messages[i], false)
-		focusStartLine += lipgloss.Height(msgStr) + 1 // +1 for the newline between messages
+		isSelected := i == m.focusedIndex
+		msgStr := m.formatMessage(&m.messages[i], isSelected)
+		focusStartLine += strings.Count(msgStr, "\n") + 1 // lines in msg
+		focusStartLine += 2                                // blank line separator between messages
 	}
 
 	focusMsgStr := m.formatMessage(&m.messages[m.focusedIndex], true)
-	focusHeight := lipgloss.Height(focusMsgStr)
-	focusEndLine := focusStartLine + focusHeight - 1 // -1 because start line is inclusive
+	focusHeight := strings.Count(focusMsgStr, "\n") + 1
+	focusEndLine := focusStartLine + focusHeight - 1
 
 	yOffset := m.viewport.YOffset()
+	viewHeight := m.viewport.Height()
 
 	if focusStartLine < yOffset {
-		// Scroll up so the start of the message is at the top of the viewport
 		m.viewport.SetYOffset(focusStartLine)
-	} else if focusEndLine >= yOffset+m.viewport.Height() {
-		// Scroll down so the end of the message is at the bottom of the viewport
-		m.viewport.SetYOffset(focusEndLine - m.viewport.Height() + 1)
+	} else if focusEndLine >= yOffset+viewHeight {
+		m.viewport.SetYOffset(focusEndLine - viewHeight + 1)
 	}
 }
 

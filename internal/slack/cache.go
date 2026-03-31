@@ -8,19 +8,21 @@ import (
 )
 
 type Cache struct {
-	mu       sync.RWMutex
-	users    map[string]*User
-	channels map[string]*Channel
-	messages map[string][]Message
-	threads  map[string][]Message // key: "channelID:threadTS"
+	mu         sync.RWMutex
+	users      map[string]*User
+	channels   map[string]*Channel
+	messages   map[string][]Message
+	threads    map[string][]Message // key: "channelID:threadTS"
+	usergroups map[string]*UserGroup
 }
 
 func NewCache() *Cache {
 	return &Cache{
-		users:    make(map[string]*User),
-		channels: make(map[string]*Channel),
-		messages: make(map[string][]Message),
-		threads:  make(map[string][]Message),
+		users:      make(map[string]*User),
+		channels:   make(map[string]*Channel),
+		messages:   make(map[string][]Message),
+		threads:    make(map[string][]Message),
+		usergroups: make(map[string]*UserGroup),
 	}
 }
 
@@ -104,4 +106,18 @@ func (c *Cache) GetThread(channelID, threadTS string) []Message {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.threads[channelID+":"+threadTS]
+}
+
+func (c *Cache) SetUserGroups(groups []UserGroup) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range groups {
+		c.usergroups[groups[i].ID] = &groups[i]
+	}
+}
+
+func (c *Cache) GetUserGroup(id string) *UserGroup {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.usergroups[id]
 }

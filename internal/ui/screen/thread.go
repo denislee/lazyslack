@@ -100,6 +100,10 @@ func (s *ThreadScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		s.messageList.GoToTop()
 	case key.Matches(msg, key.NewBinding(key.WithKeys("G"))):
 		s.messageList.GoToBottom()
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+d", "ctrl+f", "pgdown"))):
+		s.messageList.PageDown()
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+u", "ctrl+b", "pgup"))):
+		s.messageList.PageUp()
 	case key.Matches(msg, key.NewBinding(key.WithKeys("i"))):
 		s.focus = focusComposer
 		return s, s.composer.Focus()

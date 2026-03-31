@@ -25,6 +25,8 @@ func NewFormatter(cache *Cache, tsFormat string) *Formatter {
 // Format converts Slack mrkdwn to plain styled text
 func (f *Formatter) Format(text string) string {
 	text = f.resolveUserMentions(text)
+	text = f.resolveGroupMentions(text)
+	text = f.resolveSpecialMentions(text)
 	text = f.resolveChannelLinks(text)
 	text = f.resolveURLs(text)
 	text = f.resolveEmoji(text)
@@ -76,11 +78,14 @@ func (f *Formatter) FormatDate(ts string) string {
 }
 
 var (
-	reUserMention   = regexp.MustCompile(`<@(U[A-Z0-9]+)>`)
-	reChannelLink   = regexp.MustCompile(`<#(C[A-Z0-9]+)\|([^>]+)>`)
-	reURL           = regexp.MustCompile(`<(https?://[^|>]+)\|([^>]+)>`)
-	reURLNoLabel    = regexp.MustCompile(`<(https?://[^>]+)>`)
-	reEmojiShort    = regexp.MustCompile(`:([a-z0-9_+-]+):`)
+	reUserMention    = regexp.MustCompile(`<@(U[A-Z0-9]+)>`)
+	reChannelLink    = regexp.MustCompile(`<#(C[A-Z0-9]+)\|([^>]+)>`)
+	reURL            = regexp.MustCompile(`<(https?://[^|>]+)\|([^>]+)>`)
+	reURLNoLabel     = regexp.MustCompile(`<(https?://[^>]+)>`)
+	reEmojiShort     = regexp.MustCompile(`:([a-z0-9_+-]+):`)
+	reSubteamLabel   = regexp.MustCompile(`<!subteam\^(S[A-Z0-9]+)\|@([^>]+)>`)
+	reSubteamNoLabel = regexp.MustCompile(`<!subteam\^(S[A-Z0-9]+)>`)
+	reSpecialMention = regexp.MustCompile(`<!(here|channel|everyone)(\|[^>]*)?>`)
 )
 
 func (f *Formatter) resolveUserMentions(text string) string {
@@ -99,6 +104,28 @@ func (f *Formatter) resolveUserMentions(text string) string {
 		}
 		return fmt.Sprintf("@%s", userID)
 	})
+}
+
+func (f *Formatter) resolveGroupMentions(text string) string {
+	// First handle subteam mentions with labels: <!subteam^S123|@handle>
+	text = reSubteamLabel.ReplaceAllString(text, "@$2")
+	// Then handle subteam mentions without labels: <!subteam^S123>
+	text = reSubteamNoLabel.ReplaceAllStringFunc(text, func(match string) string {
+		parts := reSubteamNoLabel.FindStringSubmatch(match)
+		if len(parts) < 2 {
+			return match
+		}
+		groupID := parts[1]
+		if group := f.cache.GetUserGroup(groupID); group != nil {
+			return "@" + group.Handle
+		}
+		return "@" + groupID
+	})
+	return text
+}
+
+func (f *Formatter) resolveSpecialMentions(text string) string {
+	return reSpecialMention.ReplaceAllString(text, "@$1")
 }
 
 func (f *Formatter) resolveChannelLinks(text string) string {

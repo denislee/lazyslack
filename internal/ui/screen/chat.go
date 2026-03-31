@@ -202,13 +202,13 @@ func (s *ChatScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		}
 		return s, nil
 
-	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+d", "ctrl+f"))):
-		cmd := s.messageList.Update(msg)
-		return s, cmd
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+d", "ctrl+f", "pgdown"))):
+		s.messageList.PageDown()
+		return s, nil
 
-	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+u", "ctrl+b"))):
-		cmd := s.messageList.Update(msg)
-		return s, cmd
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+u", "ctrl+b", "pgup"))):
+		s.messageList.PageUp()
+		return s, nil
 	}
 
 	return s, nil

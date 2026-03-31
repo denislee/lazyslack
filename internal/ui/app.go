@@ -22,6 +22,7 @@ type Overlay interface {
 
 type App struct {
 	stack     []Screen
+	prevStack []Screen // saved stack when ctrl+k opens channel switcher
 	overlay   Overlay
 	showHelp  bool
 	client    *slack.Client
@@ -58,6 +59,11 @@ func (a *App) Init() tea.Cmd {
 		cmds = append(cmds, a.stack[0].Init())
 	}
 	cmds = append(cmds, a.startChannelListPolling())
+	// Fetch usergroups in background for resolving <!subteam^...> mentions
+	cmds = append(cmds, func() tea.Msg {
+		_, _ = a.client.GetUserGroups()
+		return nil
+	})
 	return tea.Batch(cmds...)
 }
 
@@ -77,6 +83,10 @@ func (a *App) pushScreen(s Screen) tea.Cmd {
 func (a *App) popScreen() {
 	if len(a.stack) > 1 {
 		a.stack = a.stack[:len(a.stack)-1]
+		// Reset filter on the channel list when returning to it
+		if channelsScreen, ok := a.activeScreen().(*screen.ChannelsScreen); ok {
+			channelsScreen.ResetFilter()
+		}
 	}
 }
 
@@ -123,11 +133,24 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
-		// Ctrl+K: quick channel switcher — pop back to channel list
+		// Ctrl+K: quick channel switcher — pop back to channel list, or restore previous screen
 		if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+k"))) {
-			// Pop all screens back to the channel list
-			for len(a.stack) > 1 {
-				a.stack = a.stack[:len(a.stack)-1]
+			if len(a.stack) == 1 && a.prevStack != nil {
+				// Already on channel list, reset filter and restore previous stack
+				if channelsScreen, ok := a.stack[0].(*screen.ChannelsScreen); ok {
+					channelsScreen.ResetFilter()
+				}
+				a.stack = a.prevStack
+				a.prevStack = nil
+				return a, nil
+			}
+			if len(a.stack) > 1 {
+				// Save current stack before popping
+				a.prevStack = make([]Screen, len(a.stack))
+				copy(a.prevStack, a.stack)
+				for len(a.stack) > 1 {
+					a.stack = a.stack[:len(a.stack)-1]
+				}
 			}
 			// Let it fall through so the ctrl+k is passed to the channel list to trigger filter
 		}

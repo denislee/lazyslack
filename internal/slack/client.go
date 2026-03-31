@@ -283,6 +283,24 @@ func (c *Client) ResolveUser(userID string) (*User, error) {
 	return user, nil
 }
 
+func (c *Client) GetUserGroups() ([]UserGroup, error) {
+	groups, err := c.api.GetUserGroups()
+	if err != nil {
+		return nil, fmt.Errorf("get usergroups: %w", err)
+	}
+
+	result := make([]UserGroup, 0, len(groups))
+	for _, g := range groups {
+		result = append(result, UserGroup{
+			ID:     g.ID,
+			Handle: g.Handle,
+			Name:   g.Name,
+		})
+	}
+	c.cache.SetUserGroups(result)
+	return result, nil
+}
+
 func (c *Client) convertMessage(msg slackapi.Message) Message {
 	username := msg.Username
 	if username == "" {

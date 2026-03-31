@@ -88,6 +88,10 @@ func (s *ChannelsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	case tea.KeyPressMsg:
 		// Don't intercept most keys when filtering, but do allow enter to quickly open the channel
 		if s.channelList.FilterState() == list.Filtering {
+			if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+k"))) {
+				s.channelList.ResetFilter()
+				return s, nil
+			}
 			if key.Matches(msg, key.NewBinding(key.WithKeys("enter"))) {
 				if ch := s.channelList.SelectedChannel(); ch != nil {
 					return s, func() tea.Msg {
@@ -136,6 +140,10 @@ func (s *ChannelsScreen) SetSize(w, h int) {
 
 func (s *ChannelsScreen) SetChannels(channels []slack.Channel) {
 	s.channelList.SetChannels(channels)
+}
+
+func (s *ChannelsScreen) ResetFilter() {
+	s.channelList.ResetFilter()
 }
 
 func (s *ChannelsScreen) ShortHelp() []key.Binding {

@@ -47,6 +47,12 @@ type File struct {
 	Mimetype string
 }
 
+type UserGroup struct {
+	ID     string
+	Handle string
+	Name   string
+}
+
 type SearchResult struct {
 	ChannelID   string
 	ChannelName string
