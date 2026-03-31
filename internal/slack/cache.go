@@ -1,0 +1,107 @@
+package slack
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sync"
+)
+
+type Cache struct {
+	mu       sync.RWMutex
+	users    map[string]*User
+	channels map[string]*Channel
+	messages map[string][]Message
+	threads  map[string][]Message // key: "channelID:threadTS"
+}
+
+func NewCache() *Cache {
+	return &Cache{
+		users:    make(map[string]*User),
+		channels: make(map[string]*Channel),
+		messages: make(map[string][]Message),
+		threads:  make(map[string][]Message),
+	}
+}
+
+func getCachePath() string {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		// Fallback to config dir or tmp if cache dir isn't available
+		cacheDir = os.TempDir()
+	}
+	dir := filepath.Join(cacheDir, "lazyslack")
+	os.MkdirAll(dir, 0755)
+	return filepath.Join(dir, "channels.json")
+}
+
+func (c *Cache) LoadChannelsFromDisk() ([]Channel, error) {
+	data, err := os.ReadFile(getCachePath())
+	if err != nil {
+		return nil, err
+	}
+	var channels []Channel
+	if err := json.Unmarshal(data, &channels); err != nil {
+		return nil, err
+	}
+	c.SetChannels(channels)
+	return channels, nil
+}
+
+func (c *Cache) SaveChannelsToDisk(channels []Channel) error {
+	data, err := json.Marshal(channels)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(getCachePath(), data, 0600)
+}
+
+func (c *Cache) GetUser(id string) *User {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.users[id]
+}
+
+func (c *Cache) SetUser(user *User) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.users[user.ID] = user
+}
+
+func (c *Cache) SetChannels(channels []Channel) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range channels {
+		c.channels[channels[i].ID] = &channels[i]
+	}
+}
+
+func (c *Cache) GetChannel(id string) *Channel {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.channels[id]
+}
+
+func (c *Cache) SetMessages(channelID string, msgs []Message) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.messages[channelID] = msgs
+}
+
+func (c *Cache) GetMessages(channelID string) []Message {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.messages[channelID]
+}
+
+func (c *Cache) SetThread(channelID, threadTS string, msgs []Message) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.threads[channelID+":"+threadTS] = msgs
+}
+
+func (c *Cache) GetThread(channelID, threadTS string) []Message {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.threads[channelID+":"+threadTS]
+}
