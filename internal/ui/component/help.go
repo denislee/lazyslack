@@ -23,6 +23,8 @@ func (h HelpOverlay) View() string {
     /          Search
     ctrl+k     Channel switcher
     ctrl+l     Refresh
+    v          Toggle sidebar
+    tab        Switch pane focus
     esc        Back / close
 
   Channel List

@@ -67,7 +67,7 @@ func (s *SearchScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		return s, nil
 
 	case searchResultsMsg:
-		if msg.query == s.input.Value() {
+		if msg.query == strings.TrimSpace(s.input.Value()) {
 			s.results = msg.results
 			s.loading = false
 			s.cursor = 0
@@ -93,6 +93,19 @@ func (s *SearchScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 						ChannelName: r.ChannelName,
 						MessageTS:   r.Message.Timestamp,
 					}
+				}
+			}
+			// Trigger search on enter if no results yet
+			query := strings.TrimSpace(s.input.Value())
+			if len(query) >= 2 {
+				s.lastQuery = query
+				s.loading = true
+				return s, func() tea.Msg {
+					results, err := s.client.Search(query)
+					if err != nil {
+						return searchErrorMsg{err: err}
+					}
+					return searchResultsMsg{query: query, results: results}
 				}
 			}
 			return s, nil
@@ -211,6 +224,13 @@ func (s *SearchScreen) SetSize(w, h int) {
 	s.width = w
 	s.height = h
 	s.input.SetWidth(w - 6)
+}
+
+func (s *SearchScreen) SelectedResult() *slack.SearchResult {
+	if len(s.results) > 0 && s.cursor < len(s.results) {
+		return &s.results[s.cursor]
+	}
+	return nil
 }
 
 func (s *SearchScreen) ShortHelp() []key.Binding {

@@ -47,7 +47,8 @@ func NewChatScreen(client *slack.Client, formatter *slack.Formatter, channelID, 
 	return s
 }
 
-func (s *ChatScreen) ChannelID() string { return s.channelID }
+func (s *ChatScreen) ChannelID() string    { return s.channelID }
+func (s *ChatScreen) InInsertMode() bool   { return s.focus == focusComposer }
 
 func (s *ChatScreen) Init() tea.Cmd {
 	return func() tea.Msg {

@@ -44,6 +44,14 @@ func NewThreadScreen(client *slack.Client, formatter *slack.Formatter, channelID
 	return s
 }
 
+func (s *ThreadScreen) ChannelID() string  { return s.channelID }
+func (s *ThreadScreen) ThreadTS() string   { return s.threadTS }
+func (s *ThreadScreen) InInsertMode() bool { return s.focus == focusComposer }
+
+func (s *ThreadScreen) SetMessages(msgs []slack.Message) {
+	s.messageList.SetMessages(msgs)
+}
+
 func (s *ThreadScreen) Init() tea.Cmd {
 	return func() tea.Msg {
 		msgs, err := s.client.GetThreadReplies(s.channelID, s.threadTS)

@@ -22,9 +22,10 @@ type KeyMap struct {
 	React       key.Binding
 	RemoveReact key.Binding
 	Reply       key.Binding
-	Yank        key.Binding
-	Unread      key.Binding
-	Filter      key.Binding
+	Yank         key.Binding
+	Unread       key.Binding
+	Filter       key.Binding
+	ToggleLayout key.Binding
 }
 
 var Keys = KeyMap{
@@ -49,5 +50,6 @@ var Keys = KeyMap{
 	Reply:       key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reply")),
 	Yank:        key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yank")),
 	Unread:      key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "unread only")),
-	Filter:      key.NewBinding(key.WithKeys("f", "tab"), key.WithHelp("f/tab", "filter")),
+	Filter:       key.NewBinding(key.WithKeys("f", "tab"), key.WithHelp("f/tab", "filter")),
+	ToggleLayout: key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "toggle sidebar")),
 }

@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/user/lazyslack/internal/slack"
 )
@@ -43,26 +44,38 @@ func (d channelDelegate) Render(w io.Writer, m list.Model, index int, listItem l
 	}
 
 	name := ch.Name
-	nameStyle := lipgloss.NewStyle().PaddingLeft(2)
-
-	// Bold unread channels
+	nameStyle := lipgloss.NewStyle()
 	if ch.UnreadCount > 0 {
 		nameStyle = nameStyle.Bold(true)
 	}
 
 	badge := ""
 	if ch.UnreadCount > 0 {
+		badge = fmt.Sprintf(" %d", ch.UnreadCount)
+	}
+
+	// Truncate name so the whole line fits in m.Width()
+	// Layout: "> " or "  " (2) + prefix + name + badge
+	prefixW := runewidth.StringWidth(prefix)
+	maxName := m.Width() - 2 - prefixW - len(badge) - 2 // extra margin for list chrome
+	if maxName < 1 {
+		maxName = 1
+	}
+	name = runewidth.Truncate(name, maxName, "…")
+
+	// Render badge with style after truncation
+	if badge != "" {
 		badge = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("33")).
 			Bold(true).
-			Render(fmt.Sprintf(" %d", ch.UnreadCount))
+			Render(badge)
 	}
 
 	if index == m.Index() {
 		nameStyle = nameStyle.Foreground(lipgloss.Color("170")).Bold(true)
-		fmt.Fprintf(w, "  > %s %s%s", prefixStyle.Render(prefix), nameStyle.Render(name), badge)
+		fmt.Fprintf(w, "> %s%s%s", prefixStyle.Render(prefix), nameStyle.Render(name), badge)
 	} else {
-		fmt.Fprintf(w, "    %s %s%s", prefixStyle.Render(prefix), nameStyle.Render(name), badge)
+		fmt.Fprintf(w, "  %s%s%s", prefixStyle.Render(prefix), nameStyle.Render(name), badge)
 	}
 }
 
@@ -72,16 +85,16 @@ type ChannelList struct {
 	unreadOnly  bool
 }
 
-func NewChannelList(width, height int) ChannelList {
+func NewChannelList(width, height int, unreadOnly bool) ChannelList {
 	l := list.New([]list.Item{}, channelDelegate{}, width, height)
 	l.Title = "Channels"
-	l.SetShowStatusBar(true)
+	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
 	l.SetShowHelp(false)
-	l.Styles.Title = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33")).Padding(0, 1)
+	l.Styles.Title = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
 
 	l.KeyMap.Filter = key.NewBinding(
-		key.WithKeys("f", "/", "ctrl+k"),
+		key.WithKeys("f", "/"),
 		key.WithHelp("f", "filter"),
 	)
 	l.KeyMap.CursorUp = key.NewBinding(
@@ -101,7 +114,7 @@ func NewChannelList(width, height int) ChannelList {
 		key.WithHelp("ctrl+f/d", "page down"),
 	)
 
-	return ChannelList{list: l}
+	return ChannelList{list: l, unreadOnly: unreadOnly}
 }
 
 func (c *ChannelList) SetChannels(channels []slack.Channel) {

@@ -1,0 +1,327 @@
+package component
+
+import (
+	"strings"
+
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/mattn/go-runewidth"
+
+	"github.com/user/lazyslack/internal/slack"
+)
+
+type QuickSwitchResult struct {
+	// Channel-based result
+	Channel *slack.Channel
+	// Message-based result (jump to channel)
+	ChannelID   string
+	ChannelName string
+	MessageTS   string
+}
+
+type QuickSwitchMsg struct {
+	Result QuickSwitchResult
+}
+
+type quickSwitchSearchResultsMsg struct {
+	query   string
+	results []slack.SearchResult
+}
+
+type resultKind int
+
+const (
+	resultChannel resultKind = iota
+	resultPerson
+	resultMessage
+)
+
+type resultEntry struct {
+	kind    resultKind
+	channel *slack.Channel   // for channel/person results
+	search  *slack.SearchResult // for message results
+}
+
+type QuickSwitcher struct {
+	input    textinput.Model
+	client   *slack.Client
+	channels []slack.Channel
+	results  []resultEntry
+	cursor   int
+	width    int
+	height   int
+
+	lastQuery      string
+	searchResults  []slack.SearchResult
+	searchLoading  bool
+}
+
+func NewQuickSwitcher(client *slack.Client, width, height int) *QuickSwitcher {
+	ti := textinput.New()
+	ti.Placeholder = "Jump to channel, person, or search..."
+	ti.Focus()
+	ti.SetWidth(50)
+
+	channels := client.Cache().GetAllChannels()
+
+	qs := &QuickSwitcher{
+		input:    ti,
+		client:   client,
+		channels: channels,
+		width:    width,
+		height:   height,
+	}
+	qs.filterResults()
+	return qs
+}
+
+func (qs *QuickSwitcher) Init() tea.Cmd {
+	return textinput.Blink
+}
+
+func (qs *QuickSwitcher) Update(msg tea.Msg) (*QuickSwitcher, tea.Cmd) {
+	switch msg := msg.(type) {
+	case quickSwitchSearchResultsMsg:
+		if msg.query == strings.TrimSpace(qs.input.Value()) {
+			qs.searchResults = msg.results
+			qs.searchLoading = false
+			qs.filterResults()
+		}
+		return qs, nil
+
+	case tea.KeyPressMsg:
+		switch {
+		case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+			if len(qs.results) > 0 && qs.cursor < len(qs.results) {
+				entry := qs.results[qs.cursor]
+				var result QuickSwitchResult
+				switch entry.kind {
+				case resultChannel, resultPerson:
+					result.Channel = entry.channel
+				case resultMessage:
+					result.ChannelID = entry.search.ChannelID
+					result.ChannelName = entry.search.ChannelName
+					result.MessageTS = entry.search.Message.Timestamp
+				}
+				return qs, func() tea.Msg {
+					return QuickSwitchMsg{Result: result}
+				}
+			}
+			return qs, nil
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("down", "ctrl+n"))):
+			qs.moveDown()
+			return qs, nil
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("up", "ctrl+p"))):
+			qs.moveUp()
+			return qs, nil
+		}
+	}
+
+	var cmd tea.Cmd
+	qs.input, cmd = qs.input.Update(msg)
+
+	query := strings.TrimSpace(qs.input.Value())
+	qs.filterResults()
+
+	// Async message search
+	if query != qs.lastQuery && len(query) >= 2 {
+		qs.lastQuery = query
+		qs.searchLoading = true
+		searchFn := func() tea.Msg {
+			results, err := qs.client.Search(query)
+			if err != nil {
+				return quickSwitchSearchResultsMsg{query: query, results: nil}
+			}
+			return quickSwitchSearchResultsMsg{query: query, results: results}
+		}
+		return qs, tea.Batch(cmd, searchFn)
+	} else if len(query) < 2 {
+		qs.lastQuery = ""
+		qs.searchResults = nil
+		qs.searchLoading = false
+		qs.filterResults()
+	}
+
+	return qs, cmd
+}
+
+func (qs *QuickSwitcher) filterResults() {
+	query := strings.ToLower(strings.TrimSpace(qs.input.Value()))
+	qs.results = qs.results[:0]
+
+	// Channels
+	for i := range qs.channels {
+		ch := &qs.channels[i]
+		if ch.IsIM || ch.IsMPIM {
+			continue
+		}
+		if query == "" || strings.Contains(strings.ToLower(ch.Name), query) {
+			qs.results = append(qs.results, resultEntry{kind: resultChannel, channel: ch})
+		}
+	}
+
+	// People (IMs)
+	for i := range qs.channels {
+		ch := &qs.channels[i]
+		if !ch.IsIM {
+			continue
+		}
+		if query == "" || strings.Contains(strings.ToLower(ch.Name), query) {
+			qs.results = append(qs.results, resultEntry{kind: resultPerson, channel: ch})
+		}
+	}
+
+	// Messages from search API
+	for i := range qs.searchResults {
+		r := &qs.searchResults[i]
+		qs.results = append(qs.results, resultEntry{kind: resultMessage, search: r})
+	}
+
+	if qs.cursor >= len(qs.results) {
+		qs.cursor = max(0, len(qs.results)-1)
+	}
+}
+
+func (qs *QuickSwitcher) moveDown() {
+	if qs.cursor < len(qs.results)-1 {
+		qs.cursor++
+	}
+}
+
+func (qs *QuickSwitcher) moveUp() {
+	if qs.cursor > 0 {
+		qs.cursor--
+	}
+}
+
+func (qs *QuickSwitcher) View() string {
+	var b strings.Builder
+
+	b.WriteString("  " + qs.input.View() + "\n")
+
+	if len(qs.results) == 0 && qs.lastQuery != "" && !qs.searchLoading {
+		b.WriteString(lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Render("\n  No results"))
+	}
+
+	maxVisible := 15
+	start := 0
+	if qs.cursor >= maxVisible {
+		start = qs.cursor - maxVisible + 1
+	}
+
+	boxW := qs.boxWidth() - 4 // padding
+
+	// Track sections for headers
+	var lastKind resultKind = -1
+	visible := 0
+	for i := start; i < len(qs.results) && visible < maxVisible; i++ {
+		entry := qs.results[i]
+
+		// Section header
+		if entry.kind != lastKind {
+			var header string
+			switch entry.kind {
+			case resultChannel:
+				header = "Channels"
+			case resultPerson:
+				header = "People"
+			case resultMessage:
+				header = "Messages"
+			}
+			headerStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240")).
+				Bold(true)
+			b.WriteString("\n " + headerStyle.Render(header) + "\n")
+			lastKind = entry.kind
+		}
+
+		line := qs.renderEntry(entry, boxW)
+		if i == qs.cursor {
+			line = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("170")).
+				Bold(true).
+				Render("> " + line)
+		} else {
+			line = "  " + line
+		}
+		b.WriteString(line + "\n")
+		visible++
+	}
+
+	if qs.searchLoading {
+		b.WriteString(lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Render("\n  Searching messages..."))
+	}
+
+	style := lipgloss.NewStyle().
+		Width(qs.boxWidth()).
+		Padding(1, 1).
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("33")).
+		Background(lipgloss.Color("235")).
+		Foreground(lipgloss.Color("252"))
+
+	return lipgloss.Place(
+		qs.width, qs.height,
+		lipgloss.Center, lipgloss.Center,
+		style.Render(b.String()),
+	)
+}
+
+func (qs *QuickSwitcher) boxWidth() int {
+	w := qs.width * 2 / 3
+	if w > 80 {
+		w = 80
+	}
+	if w < 40 {
+		w = 40
+	}
+	return w
+}
+
+func (qs *QuickSwitcher) renderEntry(entry resultEntry, maxW int) string {
+	switch entry.kind {
+	case resultChannel:
+		prefix := "#"
+		if entry.channel.IsPrivate {
+			prefix = "🔒"
+		}
+		name := runewidth.Truncate(entry.channel.Name, maxW-2, "…")
+		return prefix + name
+
+	case resultPerson:
+		name := runewidth.Truncate(entry.channel.Name, maxW-2, "…")
+		return "@" + name
+
+	case resultMessage:
+		ch := "#" + entry.search.ChannelName
+		user := entry.search.Message.Username
+		if user == "" {
+			user = entry.search.Message.UserID
+		}
+		meta := ch + " | " + user + ": "
+		metaW := runewidth.StringWidth(meta)
+		textW := maxW - metaW
+		if textW < 10 {
+			textW = 10
+		}
+		text := strings.ReplaceAll(entry.search.Message.Text, "\n", " ")
+		text = runewidth.Truncate(text, textW, "…")
+
+		metaStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+		return metaStyle.Render(meta) + text
+	}
+	return ""
+}
+
+func (qs *QuickSwitcher) SetSize(w, h int) {
+	qs.width = w
+	qs.height = h
+}

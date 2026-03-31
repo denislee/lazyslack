@@ -1,6 +1,8 @@
 package screen
 
 import (
+	"time"
+
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
@@ -14,17 +16,19 @@ type ChannelsScreen struct {
 	statusBar   component.StatusBar
 	client      *slack.Client
 	config      ChannelsConfig
+	lastPoll    time.Time
 	width       int
 	height      int
 }
 
 type ChannelsConfig struct {
-	Types []string
+	Types      []string
+	UnreadOnly bool
 }
 
 func NewChannelsScreen(client *slack.Client, cfg ChannelsConfig) *ChannelsScreen {
 	return &ChannelsScreen{
-		channelList: component.NewChannelList(80, 20),
+		channelList: component.NewChannelList(80, 20, cfg.UnreadOnly),
 		statusBar:   component.NewStatusBar(),
 		client:      client,
 		config:      cfg,
@@ -66,6 +70,10 @@ type OpenChannelMsg struct {
 	Channel slack.Channel
 }
 
+type UnreadToggleMsg struct {
+	UnreadOnly bool
+}
+
 func (s *ChannelsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -88,7 +96,7 @@ func (s *ChannelsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	case tea.KeyPressMsg:
 		// Don't intercept most keys when filtering, but do allow enter to quickly open the channel
 		if s.channelList.FilterState() == list.Filtering {
-			if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+k"))) {
+			if key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+["))) {
 				s.channelList.ResetFilter()
 				return s, nil
 			}
@@ -113,10 +121,14 @@ func (s *ChannelsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("u"))):
 			s.channelList.ToggleUnreadOnly()
-			if s.channelList.IsUnreadOnly() {
+			unread := s.channelList.IsUnreadOnly()
+			if unread {
 				s.statusBar.SetStatus("Showing unread only")
 			} else {
 				s.statusBar.SetStatus("")
+			}
+			return s, func() tea.Msg {
+				return UnreadToggleMsg{UnreadOnly: unread}
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("q", "ctrl+c"))):
 			return s, tea.Quit
@@ -128,7 +140,14 @@ func (s *ChannelsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 }
 
 func (s *ChannelsScreen) View() string {
+	if !s.lastPoll.IsZero() {
+		s.statusBar.SetStatus("polled " + s.lastPoll.Format("15:04:05"))
+	}
 	return s.channelList.View() + "\n" + s.statusBar.View()
+}
+
+func (s *ChannelsScreen) SetLastPoll(t time.Time) {
+	s.lastPoll = t
 }
 
 func (s *ChannelsScreen) SetSize(w, h int) {
@@ -144,6 +163,18 @@ func (s *ChannelsScreen) SetChannels(channels []slack.Channel) {
 
 func (s *ChannelsScreen) ResetFilter() {
 	s.channelList.ResetFilter()
+}
+
+func (s *ChannelsScreen) IsUnreadOnly() bool {
+	return s.channelList.IsUnreadOnly()
+}
+
+func (s *ChannelsScreen) FilterState() list.FilterState {
+	return s.channelList.FilterState()
+}
+
+func (s *ChannelsScreen) SelectedChannel() *slack.Channel {
+	return s.channelList.SelectedChannel()
 }
 
 func (s *ChannelsScreen) ShortHelp() []key.Binding {

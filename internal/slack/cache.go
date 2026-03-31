@@ -84,6 +84,16 @@ func (c *Cache) GetChannel(id string) *Channel {
 	return c.channels[id]
 }
 
+func (c *Cache) GetAllChannels() []Channel {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	channels := make([]Channel, 0, len(c.channels))
+	for _, ch := range c.channels {
+		channels = append(channels, *ch)
+	}
+	return channels
+}
+
 func (c *Cache) SetMessages(channelID string, msgs []Message) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
