@@ -23,7 +23,10 @@ type UserProfilePanel struct {
 }
 
 func NewUserProfilePanel() UserProfilePanel {
-	return UserProfilePanel{focusedIndex: 0}
+	return UserProfilePanel{
+		focusedIndex: 0,
+		fields:       []profileField{{label: "Email", value: "Loading..."}},
+	}
 }
 
 func (p *UserProfilePanel) SetUser(user *slack.User) {
@@ -47,9 +50,12 @@ func (p *UserProfilePanel) SetUser(user *slack.User) {
 	if user.StatusText != "" || user.StatusEmoji != "" {
 		p.fields = append(p.fields, profileField{label: "Status", value: strings.TrimSpace(user.StatusEmoji + " " + user.StatusText)})
 	}
-	if user.Email != "" {
-		p.fields = append(p.fields, profileField{label: "Email", value: user.Email})
+	
+	p.fields = append(p.fields, profileField{label: "Email", value: user.Email})
+	if user.Email == "" {
+		p.fields[len(p.fields)-1].value = "Not provided"
 	}
+
 	if user.Phone != "" {
 		p.fields = append(p.fields, profileField{label: "Phone", value: user.Phone})
 	}

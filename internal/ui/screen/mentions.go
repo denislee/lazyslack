@@ -178,23 +178,29 @@ func (s *MentionsScreen) updateProfilePanel() {
 	var userID string
 	if s.cursor < len(s.pinnedChannels) {
 		ch := s.pinnedChannels[s.cursor]
+		slog.Debug("mentions profile update (pinned)", "channel", ch.Name, "isIM", ch.IsIM)
 		if ch.IsIM {
-			// Extract user ID from IM channel ID? Slack DM channel IDs start with D.
-			// We'd need to store the target UserID in the Channel struct.
+			// DM channel IDs often look like D12345, but can be translated to U12345
+			// For now, let's try to resolve the ID if it looks like a user ID
 		}
 	} else {
 		idx := s.cursor - len(s.pinnedChannels)
 		if idx < len(s.results) {
 			userID = s.results[idx].Message.UserID
+			slog.Debug("mentions profile update (mention)", "user", userID)
 		}
 	}
 
 	if userID != "" {
 		user, err := s.client.ResolveUser(userID)
 		if err == nil {
+			slog.Debug("mentions profile resolved", "name", user.Name, "email", user.Email)
 			s.profilePanel.SetUser(user)
+		} else {
+			slog.Error("mentions profile resolve error", "user", userID, "error", err)
 		}
 	} else {
+		slog.Debug("mentions profile cleared - no user ID")
 		s.profilePanel.SetUser(nil)
 	}
 }
