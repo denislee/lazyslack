@@ -2,6 +2,7 @@ package screen
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -153,8 +154,10 @@ func (s *ThreadScreen) updateProfilePanel() {
 	}
 	user, err := s.client.ResolveUser(focused.UserID)
 	if err != nil {
+		slog.Error("thread profile resolve error", "user", focused.UserID, "error", err)
 		return
 	}
+	slog.Debug("thread profile resolved", "name", user.Name, "email", user.Email)
 	s.profilePanel.SetUser(user)
 }
 

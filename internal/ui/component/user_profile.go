@@ -31,7 +31,7 @@ func NewUserProfilePanel() UserProfilePanel {
 
 func (p *UserProfilePanel) SetUser(user *slack.User) {
 	p.user = user
-	p.fields = nil
+	p.fields = p.fields[:0]
 	p.focusedIndex = 0
 	if user == nil {
 		return
@@ -43,18 +43,12 @@ func (p *UserProfilePanel) SetUser(user *slack.User) {
 	}
 	p.fields = append(p.fields, profileField{label: "Name", value: displayName})
 	p.fields = append(p.fields, profileField{label: "Handle", value: "@" + user.Name})
-
-	if user.Title != "" {
-		p.fields = append(p.fields, profileField{label: "Title", value: user.Title})
-	}
-	if user.StatusText != "" || user.StatusEmoji != "" {
-		p.fields = append(p.fields, profileField{label: "Status", value: strings.TrimSpace(user.StatusEmoji + " " + user.StatusText)})
-	}
 	
-	p.fields = append(p.fields, profileField{label: "Email", value: user.Email})
-	if user.Email == "" {
-		p.fields[len(p.fields)-1].value = "Not provided"
+	emailVal := user.Email
+	if emailVal == "" {
+		emailVal = "MISSING_FROM_API"
 	}
+	p.fields = append(p.fields, profileField{label: "EMAIL_DEBUG", value: emailVal})
 
 	if user.Phone != "" {
 		p.fields = append(p.fields, profileField{label: "Phone", value: user.Phone})
@@ -140,7 +134,6 @@ func (p UserProfilePanel) View() string {
 		} else {
 			rows = append(rows, "  "+valueStyle.Render(truncate(f.value, contentWidth-2)))
 		}
-		rows = append(rows, "")
 	}
 
 	content := strings.Join(rows, "\n")
