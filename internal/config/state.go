@@ -7,14 +7,18 @@ import (
 )
 
 type UIState struct {
-	SidebarVisible bool `json:"sidebar_visible"`
-	UnreadOnly     bool `json:"unread_only"`
+	SidebarVisible bool              `json:"sidebar_visible"`
+	UnreadOnly     bool              `json:"unread_only"`
+	PinnedChannels []string          `json:"pinned_channels"`
+	ReadTimestamps map[string]string `json:"read_timestamps"` // channelID -> lastReadTS
 }
 
 func DefaultUIState() UIState {
 	return UIState{
 		SidebarVisible: false,
 		UnreadOnly:     true,
+		PinnedChannels: []string{},
+		ReadTimestamps: make(map[string]string),
 	}
 }
 

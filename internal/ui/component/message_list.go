@@ -13,12 +13,14 @@ import (
 )
 
 type MessageList struct {
-	viewport     viewport.Model
-	messages     []slack.Message
-	focusedIndex int
-	width        int
-	height       int
-	formatter    *slack.Formatter
+	viewport      viewport.Model
+	messages      []slack.Message
+	focusedIndex  int
+	width         int
+	height         int
+	formatter     *slack.Formatter
+	channelID     string
+	readTimestamp string
 }
 
 func NewMessageList(formatter *slack.Formatter, width, height int) MessageList {
@@ -28,25 +30,38 @@ func NewMessageList(formatter *slack.Formatter, width, height int) MessageList {
 	)
 	vp.MouseWheelEnabled = true
 	return MessageList{
-		viewport:  vp,
-		formatter: formatter,
-		width:     width,
-		height:    height,
+		viewport:     vp,
+		formatter:    formatter,
+		width:        width,
+		height:       height,
+		focusedIndex: -1,
+	}
+}
+
+func (m *MessageList) SetChannel(channelID string, readTimestamp string) {
+	m.channelID = channelID
+	m.readTimestamp = readTimestamp
+	m.focusedIndex = -1
+	m.render()
+}
+
+func (m *MessageList) SetReadTimestamp(ts string) {
+	if ts > m.readTimestamp {
+		m.readTimestamp = ts
+		m.render()
 	}
 }
 
 func (m *MessageList) SetMessages(msgs []slack.Message) {
 	wasAtBottom := len(m.messages) == 0 || m.focusedIndex >= len(m.messages)-1
 	m.messages = msgs
-	if wasAtBottom && len(msgs) > 0 {
-		m.focusedIndex = len(msgs) - 1
-	}
+	
+	// Keep focus within bounds if something was already focused
 	if m.focusedIndex >= len(msgs) {
 		m.focusedIndex = len(msgs) - 1
 	}
-	if m.focusedIndex < 0 {
-		m.focusedIndex = 0
-	}
+	// If nothing was focused, keep it at -1 (user must explicitly select)
+
 	m.render()
 	if wasAtBottom {
 		m.viewport.GotoBottom()
@@ -62,7 +77,7 @@ func (m *MessageList) SetSize(w, h int) {
 }
 
 func (m *MessageList) FocusedMessage() *slack.Message {
-	if len(m.messages) == 0 {
+	if m.focusedIndex < 0 || m.focusedIndex >= len(m.messages) {
 		return nil
 	}
 	return &m.messages[m.focusedIndex]
@@ -72,37 +87,61 @@ func (m *MessageList) FocusedIndex() int {
 	return m.focusedIndex
 }
 
+func (m *MessageList) Messages() []slack.Message {
+	return m.messages
+}
+
 func (m *MessageList) MoveUp() {
-	if m.focusedIndex > 0 {
+	if m.focusedIndex == -1 {
+		if len(m.messages) > 0 {
+			m.focusedIndex = len(m.messages) - 1
+		} else {
+			return
+		}
+	} else if m.focusedIndex > 0 {
 		m.focusedIndex--
-		m.render()
-		m.ensureVisible()
 	}
+	m.render()
+	m.ensureVisible()
 }
 
 func (m *MessageList) MoveDown() {
-	if m.focusedIndex < len(m.messages)-1 {
+	if m.focusedIndex == -1 {
+		if len(m.messages) > 0 {
+			m.focusedIndex = 0
+		} else {
+			return
+		}
+	} else if m.focusedIndex < len(m.messages)-1 {
 		m.focusedIndex++
-		m.render()
-		m.ensureVisible()
 	}
+	m.render()
+	m.ensureVisible()
 }
 
 func (m *MessageList) GoToTop() {
-	m.focusedIndex = 0
-	m.render()
-	m.viewport.GotoTop()
+	if len(m.messages) > 0 {
+		m.focusedIndex = 0
+		m.render()
+		m.viewport.GotoTop()
+	}
 }
 
 func (m *MessageList) GoToBottom() {
 	if len(m.messages) > 0 {
 		m.focusedIndex = len(m.messages) - 1
+		m.render()
+		m.viewport.GotoBottom()
 	}
-	m.render()
-	m.viewport.GotoBottom()
 }
 
 func (m *MessageList) PageUp() {
+	if len(m.messages) == 0 {
+		return
+	}
+	if m.focusedIndex == -1 {
+		m.focusedIndex = len(m.messages) - 1
+	}
 	pageSize := m.height / 3
 	if pageSize < 1 {
 		pageSize = 1
@@ -116,6 +155,12 @@ func (m *MessageList) PageUp() {
 }
 
 func (m *MessageList) PageDown() {
+	if len(m.messages) == 0 {
+		return
+	}
+	if m.focusedIndex == -1 {
+		m.focusedIndex = 0
+	}
 	pageSize := m.height / 3
 	if pageSize < 1 {
 		pageSize = 1
@@ -123,9 +168,6 @@ func (m *MessageList) PageDown() {
 	m.focusedIndex += pageSize
 	if m.focusedIndex >= len(m.messages) {
 		m.focusedIndex = len(m.messages) - 1
-	}
-	if m.focusedIndex < 0 {
-		m.focusedIndex = 0
 	}
 	m.render()
 	m.ensureVisible()
@@ -159,7 +201,7 @@ func (m *MessageList) render() {
 
 	var b strings.Builder
 	for i, msg := range m.messages {
-		isSelected := i == m.focusedIndex
+		isSelected := m.focusedIndex != -1 && i == m.focusedIndex
 		b.WriteString(m.formatMessage(&msg, isSelected))
 		if i < len(m.messages)-1 {
 			b.WriteString("\n\n")
@@ -171,19 +213,53 @@ func (m *MessageList) render() {
 func (m *MessageList) formatMessage(msg *slack.Message, isSelected bool) string {
 	contentWidth := m.width - 4
 
-	// Header: username + timestamp
-	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(userColor(msg.UserID))
-	timeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	isUnread := m.readTimestamp == "" || msg.Timestamp > m.readTimestamp
+
+	// Define colors based on read/unread status
+	nameColor := userColor(msg.UserID)
+	timeColor := lipgloss.Color("240")
+	lineColor := lipgloss.Color("237")
+	bodyColor := lipgloss.Color("252") // Default font color
+
+	if isUnread {
+		// Unread: White font, bold name
+		bodyColor = lipgloss.Color("255")
+	} else {
+		// Read: Light gray body, but keep original name color
+		bodyColor = lipgloss.Color("245")
+		// nameColor stays as userColor(msg.UserID)
+		timeColor = lipgloss.Color("238")
+		lineColor = lipgloss.Color("236")
+	}
+
+	nameStyle := lipgloss.NewStyle().Bold(isUnread).Foreground(nameColor)
+	timeStyle := lipgloss.NewStyle().Foreground(timeColor)
 
 	username := msg.Username
 	if username == "" {
 		username = msg.UserID
 	}
+
+	presenceIcon := ""
+	if user := m.formatter.GetUser(msg.UserID); user != nil {
+		if user.Presence == "active" {
+			presenceIcon = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("● ") // Green for online
+		} else {
+			presenceIcon = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("○ ") // Grey for offline
+		}
+	}
+
 	ts := m.formatter.FormatTimestamp(msg.Timestamp)
 
-	header := nameStyle.Render(username)
+	header := presenceIcon + nameStyle.Render(username)
+	if msg.ReplyCount > 0 && (msg.ThreadTS == "" || msg.ThreadTS == msg.Timestamp) {
+		header += lipgloss.NewStyle().
+			Foreground(lipgloss.Color("33")).
+			Render(" 💬")
+	}
+
 	headerRight := timeStyle.Render(ts)
-	lineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("237"))
+	lineStyle := lipgloss.NewStyle().Foreground(lineColor)
 	gap := contentWidth - lipgloss.Width(header) - lipgloss.Width(headerRight) - 2
 	if gap < 1 {
 		gap = 1
@@ -195,7 +271,7 @@ func (m *MessageList) formatMessage(msg *slack.Message, isSelected bool) string 
 	for strings.Contains(bodyText, "\n\n") {
 		bodyText = strings.ReplaceAll(bodyText, "\n\n", "\n")
 	}
-	body := lipgloss.NewStyle().Width(contentWidth).Render(bodyText)
+	body := lipgloss.NewStyle().Width(contentWidth).Foreground(bodyColor).Render(bodyText)
 
 	var lines []string
 	lines = append(lines, headerLine)
@@ -207,45 +283,52 @@ func (m *MessageList) formatMessage(msg *slack.Message, isSelected bool) string 
 		for _, r := range msg.Reactions {
 			emoji := m.formatter.FormatEmoji(r.Name)
 			text := fmt.Sprintf("%s %d", emoji, r.Count)
+			
+			rStyle := lipgloss.NewStyle().
+				Background(lipgloss.Color("237")).
+				Foreground(bodyColor). // Follow body text color
+				Padding(0, 1)
+			
 			if r.HasMe {
-				text = lipgloss.NewStyle().
-					Background(lipgloss.Color("24")).
-					Foreground(lipgloss.Color("252")).
-					Padding(0, 1).
-					Render(text)
-			} else {
-				text = lipgloss.NewStyle().
-					Background(lipgloss.Color("237")).
-					Foreground(lipgloss.Color("252")).
-					Padding(0, 1).
-					Render(text)
+				rStyle = rStyle.Background(lipgloss.Color("24")).Foreground(lipgloss.Color("255"))
 			}
-			reactionParts = append(reactionParts, text)
+			
+			reactionParts = append(reactionParts, rStyle.Render(text))
 		}
 		lines = append(lines, strings.Join(reactionParts, " "))
 	}
 
 	// Thread indicator
-	if msg.ReplyCount > 0 && msg.ThreadTS == "" {
-		threadStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Italic(true)
-		lines = append(lines, threadStyle.Render(fmt.Sprintf("  ↳ %d replies", msg.ReplyCount)))
+	if msg.ReplyCount > 0 && (msg.ThreadTS == "" || msg.ThreadTS == msg.Timestamp) {
+		threadStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("33")).
+			Italic(true).
+			Bold(isUnread)
+		lines = append(lines, threadStyle.Render(fmt.Sprintf("  ↳ %d replies (Press Enter/L to view)", msg.ReplyCount)))
 	}
 
 	content := strings.Join(lines, "\n")
 
+	// Apply styles to the entire message block
+	containerStyle := lipgloss.NewStyle().PaddingLeft(3)
+
 	if isSelected {
-		return lipgloss.NewStyle().
+		borderColor := lipgloss.Color("33")
+		if !isUnread {
+			borderColor = lipgloss.Color("24")
+		}
+		return containerStyle.
+			PaddingLeft(1).
 			BorderLeft(true).
 			BorderStyle(lipgloss.ThickBorder()).
-			BorderForeground(lipgloss.Color("33")).
-			PaddingLeft(1).
+			BorderForeground(borderColor).
 			Render(content)
 	}
-	return lipgloss.NewStyle().PaddingLeft(3).Render(content)
+	return containerStyle.Render(content)
 }
 
 func (m *MessageList) ensureVisible() {
-	if len(m.messages) == 0 {
+	if m.focusedIndex < 0 || m.focusedIndex >= len(m.messages) {
 		return
 	}
 

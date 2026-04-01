@@ -10,6 +10,7 @@ type Channel struct {
 	Purpose     string
 	UnreadCount int
 	LastReadTS  string
+	LatestTS    string
 }
 
 type Message struct {
@@ -37,6 +38,7 @@ type User struct {
 	Name        string
 	DisplayName string
 	IsBot       bool
+	Presence    string // "active" or "away"
 	StatusEmoji string
 	StatusText  string
 }

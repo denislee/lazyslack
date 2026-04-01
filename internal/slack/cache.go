@@ -58,6 +58,37 @@ func (c *Cache) SaveChannelsToDisk(channels []Channel) error {
 	return os.WriteFile(getCachePath(), data, 0600)
 }
 
+func getMessagesCachePath(channelID string) string {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = os.TempDir()
+	}
+	dir := filepath.Join(cacheDir, "lazyslack", "messages")
+	os.MkdirAll(dir, 0755)
+	return filepath.Join(dir, channelID+".json")
+}
+
+func (c *Cache) LoadMessagesFromDisk(channelID string) ([]Message, error) {
+	data, err := os.ReadFile(getMessagesCachePath(channelID))
+	if err != nil {
+		return nil, err
+	}
+	var messages []Message
+	if err := json.Unmarshal(data, &messages); err != nil {
+		return nil, err
+	}
+	c.SetMessages(channelID, messages)
+	return messages, nil
+}
+
+func (c *Cache) SaveMessagesToDisk(channelID string, messages []Message) error {
+	data, err := json.Marshal(messages)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(getMessagesCachePath(channelID), data, 0600)
+}
+
 func (c *Cache) GetUser(id string) *User {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -74,7 +105,14 @@ func (c *Cache) SetChannels(channels []Channel) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for i := range channels {
-		c.channels[channels[i].ID] = &channels[i]
+		id := channels[i].ID
+		if existing, ok := c.channels[id]; ok {
+			// Keep the newest timestamp we've seen
+			if existing.LatestTS > channels[i].LatestTS {
+				channels[i].LatestTS = existing.LatestTS
+			}
+		}
+		c.channels[id] = &channels[i]
 	}
 }
 

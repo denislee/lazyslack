@@ -31,6 +31,39 @@ func (f *Formatter) Format(text string) string {
 	text = f.resolveURLs(text)
 	text = f.resolveEmoji(text)
 	text = f.resolveHTMLEntities(text)
+
+	// Use placeholders to protect code from other formatting
+	var codes []string
+	text = reCodeBlock.ReplaceAllStringFunc(text, func(match string) string {
+		codes = append(codes, match)
+		return fmt.Sprintf("___CODE_BLOCK_%d___", len(codes)-1)
+	})
+	text = reInlineCode.ReplaceAllStringFunc(text, func(match string) string {
+		codes = append(codes, match)
+		return fmt.Sprintf("___INLINE_CODE_%d___", len(codes)-1)
+	})
+
+	// Apply styles to non-code text
+	text = f.resolveBold(text)
+	text = f.resolveItalic(text)
+	text = f.resolveStrike(text)
+
+	// Put code back with styling
+	for i, code := range codes {
+		var styled string
+		if strings.HasPrefix(code, "```") {
+			// Code block: background only, no extra padding
+			content := reCodeBlock.FindStringSubmatch(code)[1]
+			styled = "\x1b[48;5;235m\x1b[38;5;252m" + content + "\x1b[39m\x1b[49m"
+			text = strings.Replace(text, fmt.Sprintf("___CODE_BLOCK_%d___", i), styled, 1)
+		} else {
+			// Inline code: background and slight padding
+			content := reInlineCode.FindStringSubmatch(code)[1]
+			styled = "\x1b[48;5;236m\x1b[38;5;252m " + content + " \x1b[39m\x1b[49m"
+			text = strings.Replace(text, fmt.Sprintf("___INLINE_CODE_%d___", i), styled, 1)
+		}
+	}
+
 	return text
 }
 
@@ -131,6 +164,10 @@ func (f *Formatter) FormatDate(ts string) string {
 	return time.Unix(sec, 0).Local().Format("Monday, January 2, 2006")
 }
 
+func (f *Formatter) GetUser(userID string) *User {
+	return f.cache.GetUser(userID)
+}
+
 var (
 	reUserMention    = regexp.MustCompile(`<@(U[A-Z0-9]+)>`)
 	reChannelLink    = regexp.MustCompile(`<#(C[A-Z0-9]+)\|([^>]+)>`)
@@ -140,6 +177,13 @@ var (
 	reSubteamLabel   = regexp.MustCompile(`<!subteam\^(S[A-Z0-9]+)\|@([^>]+)>`)
 	reSubteamNoLabel = regexp.MustCompile(`<!subteam\^(S[A-Z0-9]+)>`)
 	reSpecialMention = regexp.MustCompile(`<!(here|channel|everyone)(\|[^>]*)?>`)
+	reBold2          = regexp.MustCompile(`(^|[\s(\[])\*\*([^\s\*](?:.*?[^\s\*])?)\*\*`)
+	reBold1          = regexp.MustCompile(`(^|[\s(\[])\*([^\s\*](?:.*?[^\s\*])?)\*`)
+	reItalic2        = regexp.MustCompile(`(^|[\s(\[])__([^\s_](?:.*?[^\s_])?)__`)
+	reItalic1        = regexp.MustCompile(`(^|[\s(\[])_([^\s_](?:.*?[^\s_])?)_`)
+	reStrike         = regexp.MustCompile(`(^|[\s(\[])~([^\s~](?:.*?[^\s~])?)~`)
+	reInlineCode     = regexp.MustCompile("`([^`]+)`")
+	reCodeBlock      = regexp.MustCompile("(?s)```(.+?)```")
 )
 
 func (f *Formatter) resolveUserMentions(text string) string {
@@ -200,6 +244,20 @@ func (f *Formatter) resolveEmoji(text string) string {
 		}
 		return f.FormatEmoji(parts[1])
 	})
+}
+
+func (f *Formatter) resolveBold(text string) string {
+	text = reBold2.ReplaceAllString(text, "$1\x1b[1m$2\x1b[22m")
+	return reBold1.ReplaceAllString(text, "$1\x1b[1m$2\x1b[22m")
+}
+
+func (f *Formatter) resolveItalic(text string) string {
+	text = reItalic2.ReplaceAllString(text, "$1\x1b[3m$2\x1b[23m")
+	return reItalic1.ReplaceAllString(text, "$1\x1b[3m$2\x1b[23m")
+}
+
+func (f *Formatter) resolveStrike(text string) string {
+	return reStrike.ReplaceAllString(text, "$1\x1b[9m$2\x1b[29m")
 }
 
 // ExtractURLs returns all URLs found in Slack mrkdwn text.

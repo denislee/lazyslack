@@ -25,6 +25,10 @@ type QuickSwitchMsg struct {
 	Result QuickSwitchResult
 }
 
+type ToggleFavoriteMsg struct {
+	ChannelID string
+}
+
 type quickSwitchSearchResultsMsg struct {
 	query   string
 	results []slack.SearchResult
@@ -107,6 +111,18 @@ func (qs *QuickSwitcher) Update(msg tea.Msg) (*QuickSwitcher, tea.Cmd) {
 				}
 				return qs, func() tea.Msg {
 					return QuickSwitchMsg{Result: result}
+				}
+			}
+			return qs, nil
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+f"))):
+			if len(qs.results) > 0 && qs.cursor < len(qs.results) {
+				entry := qs.results[qs.cursor]
+				if entry.channel != nil {
+					id := entry.channel.ID
+					return qs, func() tea.Msg {
+						return ToggleFavoriteMsg{ChannelID: id}
+					}
 				}
 			}
 			return qs, nil

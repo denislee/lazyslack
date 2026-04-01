@@ -1,8 +1,10 @@
 package screen
 
 import (
+	"fmt"
 	"image/color"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,18 +13,21 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/user/lazyslack/internal/slack"
+	"github.com/user/lazyslack/internal/ui/component"
 )
 
 type MentionsScreen struct {
-	results   []slack.SearchResult
-	cursor    int
-	client    *slack.Client
-	formatter *slack.Formatter
-	lastPoll  time.Time
-	loading   bool
-	err       string
-	width     int
-	height    int
+	results        []slack.SearchResult
+	pinnedChannels []slack.Channel
+	readTimestamps map[string]string
+	cursor         int
+	client         *slack.Client
+	formatter      *slack.Formatter
+	lastPoll       time.Time
+	loading        bool
+	err            string
+	width          int
+	height         int
 }
 
 func NewMentionsScreen(client *slack.Client, formatter *slack.Formatter) *MentionsScreen {
@@ -61,9 +66,7 @@ func (s *MentionsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		slog.Info("mentions data received", "count", len(msg.results))
 		s.results = deduplicateMentions(msg.results)
 		s.loading = false
-		if s.cursor >= len(s.results) {
-			s.cursor = max(len(s.results)-1, 0)
-		}
+		s.clampCursor()
 		return s, nil
 
 	case mentionsErrorMsg:
@@ -73,9 +76,14 @@ func (s *MentionsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		return s, nil
 
 	case tea.KeyPressMsg:
+		total := len(s.pinnedChannels) + len(s.results)
+		if total == 0 {
+			return s, nil
+		}
+
 		switch {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("j", "down", "ctrl+n"))):
-			if s.cursor < len(s.results)-1 {
+			if s.cursor < total-1 {
 				s.cursor++
 			}
 			return s, nil
@@ -91,17 +99,12 @@ func (s *MentionsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			return s, nil
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("G"))):
-			if len(s.results) > 0 {
-				s.cursor = len(s.results) - 1
-			}
+			s.cursor = total - 1
 			return s, nil
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+d", "ctrl+f", "pgdown"))):
 			page := max((s.height-2)/3, 1)
-			s.cursor = min(s.cursor+page, len(s.results)-1)
-			if s.cursor < 0 {
-				s.cursor = 0
-			}
+			s.cursor = min(s.cursor+page, total-1)
 			return s, nil
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+u", "ctrl+b", "pgup"))):
@@ -109,13 +112,31 @@ func (s *MentionsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			s.cursor = max(s.cursor-page, 0)
 			return s, nil
 
-		case key.Matches(msg, key.NewBinding(key.WithKeys("enter", "l"))):
-			if r := s.SelectedResult(); r != nil {
+		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+f"))):
+			id := s.SelectedChannelID()
+			if id != "" {
 				return s, func() tea.Msg {
-					return OpenChannelMsg{Channel: slack.Channel{
-						ID:   r.ChannelID,
-						Name: r.ChannelName,
-					}}
+					return component.ToggleFavoriteMsg{ChannelID: id}
+				}
+			}
+			return s, nil
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("enter", "l"))):
+			if s.cursor < len(s.pinnedChannels) {
+				ch := s.pinnedChannels[s.cursor]
+				return s, func() tea.Msg {
+					return OpenChannelMsg{Channel: ch}
+				}
+			} else {
+				idx := s.cursor - len(s.pinnedChannels)
+				if idx < len(s.results) {
+					r := s.results[idx]
+					return s, func() tea.Msg {
+						return OpenChannelMsg{Channel: slack.Channel{
+							ID:   r.ChannelID,
+							Name: r.ChannelName,
+						}}
+					}
 				}
 			}
 			return s, nil
@@ -133,13 +154,71 @@ func (s *MentionsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	return s, nil
 }
 
+func (s *MentionsScreen) clampCursor() {
+	total := len(s.pinnedChannels) + len(s.results)
+	if s.cursor >= total {
+		s.cursor = max(total-1, 0)
+	}
+}
+
 func (s *MentionsScreen) View() string {
 	var b strings.Builder
 
+	// 1. Pinned Channels
+	if len(s.pinnedChannels) > 0 {
+		title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33")).Render("Favorites")
+		b.WriteString(title + "\n")
+		for i, ch := range s.pinnedChannels {
+			isSelected := i == s.cursor
+			prefix := "#"
+			if ch.IsIM {
+				prefix = "@"
+			}
+			
+			badge := ""
+			isUnread := false
+			if s.readTimestamps != nil {
+				localTS := s.readTimestamps[ch.ID]
+				if ch.LatestTS != "" && (localTS == "" || ch.LatestTS > localTS) {
+					isUnread = true
+				} else if ch.UnreadCount > 0 && localTS == "" {
+					isUnread = true
+				}
+			}
+
+			if isUnread && ch.UnreadCount > 0 {
+				badge = fmt.Sprintf(" %d", ch.UnreadCount)
+			}
+
+			// Truncate name to fit: width - 2 (padding) - 2 (prefix) - lipgloss.Width(badge)
+			nameWidth := s.width - 4 - lipgloss.Width(badge)
+			name := truncate(ch.Name, nameWidth)
+
+			content := prefix + name + badge
+			style := lipgloss.NewStyle()
+			if isUnread {
+				style = style.Foreground(lipgloss.Color("255")).Bold(true) // White for unread
+			} else {
+				style = style.Foreground(lipgloss.Color("244")) // Gray for read
+			}
+
+			if isSelected {
+				b.WriteString(lipgloss.NewStyle().
+					Foreground(lipgloss.Color("170")).
+					Bold(true).
+					Render("> " + content) + "\n")
+			} else {
+				b.WriteString("  " + style.Render(content) + "\n")
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	// 2. Mentions
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33")).Render("Mentions")
 	b.WriteString(title + "\n")
 
-	if s.loading {
+	if s.loading && len(s.results) == 0 {
 		b.WriteString(lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240")).
 			Padding(1, 1).
@@ -163,13 +242,26 @@ func (s *MentionsScreen) View() string {
 		return b.String()
 	}
 
+	// Calculate how much space is left for mentions
+	pinnedHeight := 0
+	if len(s.pinnedChannels) > 0 {
+		pinnedHeight = len(s.pinnedChannels) + 2 // title + blank line
+	}
+	availHeight := s.height - pinnedHeight - 1 // -1 for mentions title
+
 	itemHeight := 2
-	availHeight := s.height - 1 // title
 	visible := max(availHeight/itemHeight, 1)
 
+	mentionStartCursor := len(s.pinnedChannels)
+	
+	relativeMentionCursor := s.cursor - mentionStartCursor
+	if relativeMentionCursor < 0 {
+		relativeMentionCursor = 0
+	}
+
 	start := 0
-	if s.cursor >= visible {
-		start = s.cursor - visible + 1
+	if relativeMentionCursor >= visible {
+		start = relativeMentionCursor - visible + 1
 	}
 	end := min(start+visible, len(s.results))
 
@@ -177,7 +269,7 @@ func (s *MentionsScreen) View() string {
 
 	for i := start; i < end; i++ {
 		r := s.results[i]
-		isSelected := i == s.cursor
+		isSelected := (i + mentionStartCursor) == s.cursor
 
 		age := s.formatter.FormatTimestampAge(r.Message.Timestamp)
 		prefix := "#"
@@ -188,6 +280,18 @@ func (s *MentionsScreen) View() string {
 
 		// Channel + age on one line
 		chanStyle := lipgloss.NewStyle().Foreground(mentionColor(r.Message.UserID))
+		isUnread := false
+		if s.readTimestamps != nil {
+			localTS := s.readTimestamps[r.ChannelID]
+			if localTS == "" || r.Message.Timestamp > localTS {
+				isUnread = true
+			}
+		}
+		
+		if isUnread {
+			chanStyle = chanStyle.Bold(true)
+		}
+
 		ageStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 		ageStr := ageStyle.Render(age)
 		header := chanStyle.Render(truncate(channel, contentWidth-len(age)-1)) + " " + ageStr
@@ -197,6 +301,9 @@ func (s *MentionsScreen) View() string {
 		preview = strings.ReplaceAll(preview, "\n", " ")
 		preview = truncate(preview, contentWidth)
 		previewStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+		if isUnread {
+			previewStyle = previewStyle.Bold(true).Foreground(lipgloss.Color("255"))
+		}
 		content := header + "\n" + previewStyle.Render(preview)
 
 		if isSelected {
@@ -219,12 +326,45 @@ func (s *MentionsScreen) SetSize(w, h int) {
 	s.height = h
 }
 
+func (s *MentionsScreen) Results() []slack.SearchResult {
+	return s.results
+}
+
+func (s *MentionsScreen) SetReadTimestamps(readTimestamps map[string]string) {
+	s.readTimestamps = readTimestamps
+}
+
 func (s *MentionsScreen) SetMentions(results []slack.SearchResult) {
 	s.results = deduplicateMentions(results)
+	// Sort mentions alphabetically by channel name
+	sort.Slice(s.results, func(i, j int) bool {
+		return strings.ToLower(s.results[i].ChannelName) < strings.ToLower(s.results[j].ChannelName)
+	})
 	s.loading = false
-	if s.cursor >= len(s.results) {
-		s.cursor = max(len(s.results)-1, 0)
+	s.clampCursor()
+}
+
+func (s *MentionsScreen) SetPinnedChannels(channels []slack.Channel, pinnedIDs []string, readTimestamps map[string]string) {
+	s.readTimestamps = readTimestamps
+	pinnedMap := make(map[string]bool)
+	for _, id := range pinnedIDs {
+		pinnedMap[id] = true
 	}
+	
+	filtered := make([]slack.Channel, 0)
+	for _, ch := range channels {
+		if pinnedMap[ch.ID] {
+			filtered = append(filtered, ch)
+		}
+	}
+
+	// Sort favorites alphabetically by name
+	sort.Slice(filtered, func(i, j int) bool {
+		return strings.ToLower(filtered[i].Name) < strings.ToLower(filtered[j].Name)
+	})
+
+	s.pinnedChannels = filtered
+	s.clampCursor()
 }
 
 func (s *MentionsScreen) SetLastPoll(t time.Time) {
@@ -236,13 +376,24 @@ func (s *MentionsScreen) SetPollError(err error) {
 }
 
 func (s *MentionsScreen) SelectedResult() *slack.SearchResult {
-	if len(s.results) > 0 && s.cursor < len(s.results) {
-		return &s.results[s.cursor]
+	idx := s.cursor - len(s.pinnedChannels)
+	if idx >= 0 && idx < len(s.results) {
+		return &s.results[idx]
+	}
+	return nil
+}
+
+func (s *MentionsScreen) SelectedChannel() *slack.Channel {
+	if s.cursor >= 0 && s.cursor < len(s.pinnedChannels) {
+		return &s.pinnedChannels[s.cursor]
 	}
 	return nil
 }
 
 func (s *MentionsScreen) SelectedChannelID() string {
+	if ch := s.SelectedChannel(); ch != nil {
+		return ch.ID
+	}
 	if r := s.SelectedResult(); r != nil {
 		return r.ChannelID
 	}
@@ -273,6 +424,12 @@ func deduplicateMentions(results []slack.SearchResult) []slack.SearchResult {
 		seen[k] = true
 		out = append(out, r)
 	}
+
+	// Always sort results alphabetically
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].ChannelName) < strings.ToLower(out[j].ChannelName)
+	})
+
 	return out
 }
 

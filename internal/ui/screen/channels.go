@@ -18,6 +18,7 @@ type ChannelsScreen struct {
 	statusBar      component.StatusBar
 	client         *slack.Client
 	config         ChannelsConfig
+	readTimestamps map[string]string
 	lastPoll       time.Time
 	lastUnreadCount int
 	width          int
@@ -26,6 +27,7 @@ type ChannelsScreen struct {
 
 type ChannelsConfig struct {
 	Types      []string
+	PinnedIDs  []string
 	UnreadOnly bool
 }
 
@@ -50,7 +52,7 @@ func (s *ChannelsScreen) Init() tea.Cmd {
 
 	// Fetch fresh channels in background
 	cmds = append(cmds, func() tea.Msg {
-		channels, err := s.client.GetChannels(s.config.Types)
+		channels, err := s.client.GetChannels(s.config.Types, s.config.PinnedIDs)
 		if err != nil {
 			return channelsErrorMsg{err: err}
 		}
@@ -91,7 +93,7 @@ func (s *ChannelsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			}
 		}
 		slog.Info("channels data received", "total", len(msg.channels), "with_unread", unread, "cached", msg.isCached)
-		s.channelList.SetChannels(msg.channels)
+		s.channelList.SetChannels(msg.channels, s.config.PinnedIDs, s.readTimestamps)
 		if msg.isCached {
 			s.statusBar.SetStatus("Loading fresh channels in background...")
 		} else {
@@ -169,7 +171,7 @@ func (s *ChannelsScreen) SetSize(w, h int) {
 	s.statusBar.SetWidth(w)
 }
 
-func (s *ChannelsScreen) SetChannels(channels []slack.Channel) {
+func (s *ChannelsScreen) SetChannels(channels []slack.Channel, pinnedIDs []string, readTimestamps map[string]string) {
 	unread := 0
 	for _, ch := range channels {
 		if ch.UnreadCount > 0 {
@@ -177,7 +179,14 @@ func (s *ChannelsScreen) SetChannels(channels []slack.Channel) {
 		}
 	}
 	s.lastUnreadCount = unread
-	s.channelList.SetChannels(channels)
+	s.config.PinnedIDs = pinnedIDs
+	s.readTimestamps = readTimestamps
+	s.channelList.SetChannels(channels, pinnedIDs, readTimestamps)
+}
+
+func (s *ChannelsScreen) SetReadTimestamps(readTimestamps map[string]string) {
+	s.readTimestamps = readTimestamps
+	s.channelList.SetChannels(s.channelList.AllChannels(), s.config.PinnedIDs, readTimestamps)
 }
 
 func (s *ChannelsScreen) SetPollError(err error) {

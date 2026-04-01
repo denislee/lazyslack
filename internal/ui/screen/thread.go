@@ -7,39 +7,43 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/atotto/clipboard"
 
 	"github.com/user/lazyslack/internal/slack"
 	"github.com/user/lazyslack/internal/ui/component"
 )
 
 type ThreadScreen struct {
-	messageList component.MessageList
-	composer    component.Composer
-	statusBar   component.StatusBar
-	client      *slack.Client
-	formatter   *slack.Formatter
-	channelID   string
-	channelName string
-	threadTS    string
-	parentMsg   slack.Message
-	focus       chatFocus
-	width       int
-	height      int
+	messageList   component.MessageList
+	composer      component.Composer
+	statusBar     component.StatusBar
+	client        *slack.Client
+	formatter     *slack.Formatter
+	channelID     string
+	channelName   string
+	threadTS      string
+	readTimestamp string
+	parentMsg     slack.Message
+	focus         chatFocus
+	width         int
+	height        int
 }
 
-func NewThreadScreen(client *slack.Client, formatter *slack.Formatter, channelID, channelName, threadTS string, parentMsg slack.Message) *ThreadScreen {
+func NewThreadScreen(client *slack.Client, formatter *slack.Formatter, channelID, channelName, threadTS string, parentMsg slack.Message, readTimestamp string) *ThreadScreen {
 	s := &ThreadScreen{
-		messageList: component.NewMessageList(formatter, 80, 15),
-		composer:    component.NewComposer(80),
-		statusBar:   component.NewStatusBar(),
-		client:      client,
-		formatter:   formatter,
-		channelID:   channelID,
-		channelName: channelName,
-		threadTS:    threadTS,
-		parentMsg:   parentMsg,
-		focus:       focusMessages,
+		messageList:   component.NewMessageList(formatter, 80, 15),
+		composer:      component.NewComposer(80),
+		statusBar:     component.NewStatusBar(),
+		client:        client,
+		formatter:     formatter,
+		channelID:     channelID,
+		channelName:   channelName,
+		threadTS:      threadTS,
+		readTimestamp: readTimestamp,
+		parentMsg:     parentMsg,
+		focus:         focusMessages,
 	}
+	s.messageList.SetChannel(channelID, readTimestamp)
 	s.statusBar.SetChannel(fmt.Sprintf("Thread in %s", channelName))
 	return s
 }
@@ -53,17 +57,31 @@ func (s *ThreadScreen) SetMessages(msgs []slack.Message) {
 }
 
 func (s *ThreadScreen) Init() tea.Cmd {
-	return func() tea.Msg {
+	var cmds []tea.Cmd
+
+	// 1. Load from cache (using a special thread key)
+	threadKey := s.channelID + ":" + s.threadTS
+	if cachedMsgs, err := s.client.Cache().LoadMessagesFromDisk(threadKey); err == nil && len(cachedMsgs) > 0 {
+		cmds = append(cmds, func() tea.Msg {
+			return threadMessagesMsg{messages: cachedMsgs, isCached: true}
+		})
+	}
+
+	// 2. Fetch fresh messages in background
+	cmds = append(cmds, func() tea.Msg {
 		msgs, err := s.client.GetThreadReplies(s.channelID, s.threadTS)
 		if err != nil {
 			return threadErrorMsg{err: err}
 		}
-		return threadMessagesMsg{messages: msgs}
-	}
+		return threadMessagesMsg{messages: msgs, isCached: false}
+	})
+
+	return tea.Batch(cmds...)
 }
 
 type threadMessagesMsg struct {
 	messages []slack.Message
+	isCached bool
 }
 
 type threadErrorMsg struct {
@@ -77,8 +95,15 @@ func (s *ThreadScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		return s, nil
 
 	case threadMessagesMsg:
-		s.messageList.SetMessages(msg.messages)
-		s.messageList.ScrollToBottom()
+		if msg.isCached {
+			s.messageList.SetMessages(msg.messages)
+			s.messageList.ScrollToBottom()
+		} else {
+			current := s.messageList.Messages()
+			merged := s.client.MergeMessages(current, msg.messages)
+			s.messageList.SetMessages(merged)
+			s.messageList.ScrollToBottom()
+		}
 		return s, nil
 
 	case threadErrorMsg:
@@ -90,28 +115,56 @@ func (s *ThreadScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			return s.handleComposerKey(msg)
 		}
 		return s.handleNormalKey(msg)
+
+	case tea.PasteMsg:
+		if s.focus == focusComposer {
+			cmd := s.composer.Update(msg)
+			return s, cmd
+		}
 	}
 
 	return s, nil
 }
 
+func (s *ThreadScreen) checkReadStatus() tea.Cmd {
+	focused := s.messageList.FocusedMessage()
+	if focused != nil && (s.readTimestamp == "" || focused.Timestamp > s.readTimestamp) {
+		s.readTimestamp = focused.Timestamp
+		s.messageList.SetReadTimestamp(s.readTimestamp)
+		return func() tea.Msg {
+			return UpdateReadTimestampMsg{
+				ChannelID: s.channelID,
+				Timestamp: s.readTimestamp,
+			}
+		}
+	}
+	return nil
+}
+
 func (s *ThreadScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
+	var cmds []tea.Cmd
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+[", "h"))):
 		return s, func() tea.Msg { return GoBackMsg{} }
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("j", "down", "ctrl+n"))):
 		s.messageList.MoveDown()
+		cmds = append(cmds, s.checkReadStatus())
 	case key.Matches(msg, key.NewBinding(key.WithKeys("k", "up", "ctrl+p"))):
 		s.messageList.MoveUp()
+		cmds = append(cmds, s.checkReadStatus())
 	case key.Matches(msg, key.NewBinding(key.WithKeys("g"))):
 		s.messageList.GoToTop()
+		cmds = append(cmds, s.checkReadStatus())
 	case key.Matches(msg, key.NewBinding(key.WithKeys("G"))):
 		s.messageList.GoToBottom()
+		cmds = append(cmds, s.checkReadStatus())
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+d", "ctrl+f", "pgdown"))):
 		s.messageList.PageDown()
+		cmds = append(cmds, s.checkReadStatus())
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+u", "ctrl+b", "pgup"))):
 		s.messageList.PageUp()
+		cmds = append(cmds, s.checkReadStatus())
 	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
 		focused := s.messageList.FocusedMessage()
 		if focused != nil {
@@ -120,12 +173,25 @@ func (s *ThreadScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 			}
 		}
 		return s, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("y"))):
+		focused := s.messageList.FocusedMessage()
+		if focused != nil {
+			err := clipboard.WriteAll(focused.Text)
+			if err != nil {
+				s.statusBar.SetError("Failed to copy to clipboard")
+			} else {
+				s.statusBar.SetStatus("Copied to clipboard")
+			}
+		}
+		return s, nil
+
 	case key.Matches(msg, key.NewBinding(key.WithKeys("i"))):
 		s.focus = focusComposer
 		return s, s.composer.Focus()
 	}
 
-	return s, nil
+	return s, tea.Batch(cmds...)
 }
 
 func (s *ThreadScreen) handleComposerKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
@@ -214,6 +280,7 @@ func (s *ThreadScreen) ShortHelp() []key.Binding {
 	}
 	return []key.Binding{
 		key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "reply")),
+		key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yank")),
 		key.NewBinding(key.WithKeys("j/k"), key.WithHelp("j/k", "navigate")),
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open link")),
 		key.NewBinding(key.WithKeys("escape", "ctrl+[", "h"), key.WithHelp("esc/h", "back")),

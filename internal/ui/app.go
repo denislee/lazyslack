@@ -33,6 +33,8 @@ type App struct {
 	client         *slack.Client
 	formatter      *slack.Formatter
 	config         *config.Config
+	pinnedChannels []string
+	readTimestamps map[string]string // channelID -> lastReadTS
 	width          int
 	height         int
 
@@ -53,6 +55,8 @@ func NewApp(client *slack.Client, cfg *config.Config) *App {
 		client:         client,
 		formatter:      formatter,
 		config:         cfg,
+		pinnedChannels: uiState.PinnedChannels,
+		readTimestamps: uiState.ReadTimestamps,
 		lastActive:     time.Now(),
 	}
 	return app
@@ -61,6 +65,9 @@ func NewApp(client *slack.Client, cfg *config.Config) *App {
 func (a *App) saveUIState() {
 	config.SaveUIState(config.UIState{
 		SidebarVisible: a.sidebarVisible,
+		PinnedChannels: a.pinnedChannels,
+		ReadTimestamps: a.readTimestamps,
+		UnreadOnly:     true, // Default back to true if no ChannelsScreen
 	})
 }
 
@@ -70,6 +77,27 @@ func (a *App) Init() tea.Cmd {
 	if len(a.stack) > 0 {
 		cmds = append(cmds, a.stack[0].Init())
 	}
+
+	// Load from cache immediately if available
+	if cachedChannels, err := a.client.Cache().LoadChannelsFromDisk(); err == nil && len(cachedChannels) > 0 {
+		slog.Info("loaded channels from cache", "count", len(cachedChannels))
+		if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
+			ms.SetPinnedChannels(cachedChannels, a.pinnedChannels, a.readTimestamps)
+		}
+		cmds = append(cmds, func() tea.Msg {
+			return channelListRefreshMsg{channels: cachedChannels}
+		})
+	}
+
+	// Trigger immediate fetch instead of waiting for first poll tick
+	cmds = append(cmds, func() tea.Msg {
+		channels, err := a.client.GetChannels(a.config.Channels.Types, a.pinnedChannels)
+		if err != nil {
+			return pollErrorMsg{err: err, source: "channel_list"}
+		}
+		return channelListRefreshMsg{channels: channels}
+	})
+
 	cmds = append(cmds, a.startChannelListPolling())
 	cmds = append(cmds, a.startMentionsPolling())
 	// Fetch usergroups in background for resolving <!subteam^...> mentions
@@ -258,7 +286,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for len(a.stack) > 1 {
 					a.stack = a.stack[:len(a.stack)-1]
 				}
-				chatScreen := screen.NewChatScreen(a.client, a.formatter, r.ChannelID, "#"+r.ChannelName)
+				chatScreen := screen.NewChatScreen(a.client, a.formatter, r.ChannelID, "#"+r.ChannelName, a.readTimestamps[r.ChannelID])
 				cmd := a.pushScreen(chatScreen)
 				pollCmd := a.startChannelPolling(r.ChannelID)
 				return a, tea.Batch(cmd, pollCmd)
@@ -281,10 +309,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// In sidebar mode: replace the current chat (and any thread) with new channel
 			a.stack = a.stack[:1]
 		}
-		chatScreen := screen.NewChatScreen(a.client, a.formatter, msg.Channel.ID, prefix+msg.Channel.Name)
+		chatScreen := screen.NewChatScreen(a.client, a.formatter, msg.Channel.ID, prefix+msg.Channel.Name, a.readTimestamps[msg.Channel.ID])
 		a.sidebarFocus = focusMain
 		cmd := a.pushScreen(chatScreen)
 		pollCmd := a.startChannelPolling(msg.Channel.ID)
+
 		return a, tea.Batch(cmd, pollCmd)
 
 	case component.QuickSwitchMsg:
@@ -299,10 +328,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.sidebarVisible && len(a.stack) > 1 {
 				a.stack = a.stack[:1]
 			}
-			chatScreen := screen.NewChatScreen(a.client, a.formatter, r.Channel.ID, prefix+r.Channel.Name)
+			chatScreen := screen.NewChatScreen(a.client, a.formatter, r.Channel.ID, prefix+r.Channel.Name, a.readTimestamps[r.Channel.ID])
 			a.sidebarFocus = focusMain
 			cmd := a.pushScreen(chatScreen)
 			pollCmd := a.startChannelPolling(r.Channel.ID)
+
 			return a, tea.Batch(cmd, pollCmd)
 		}
 		if r.ChannelID != "" {
@@ -310,15 +340,46 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for len(a.stack) > 1 {
 				a.stack = a.stack[:len(a.stack)-1]
 			}
-			chatScreen := screen.NewChatScreen(a.client, a.formatter, r.ChannelID, "#"+r.ChannelName)
+			chatScreen := screen.NewChatScreen(a.client, a.formatter, r.ChannelID, "#"+r.ChannelName, a.readTimestamps[r.ChannelID])
 			cmd := a.pushScreen(chatScreen)
 			pollCmd := a.startChannelPolling(r.ChannelID)
 			return a, tea.Batch(cmd, pollCmd)
 		}
 		return a, nil
 
+	case component.ToggleFavoriteMsg:
+		a.quickSwitcher = nil
+		found := false
+		for i, id := range a.pinnedChannels {
+			if id == msg.ChannelID {
+				a.pinnedChannels = append(a.pinnedChannels[:i], a.pinnedChannels[i+1:]...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			a.pinnedChannels = append(a.pinnedChannels, msg.ChannelID)
+		}
+		a.saveUIState()
+
+		// Immediately tell the sidebar about the new pinned IDs
+		if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
+			// Using the currently cached channels in the client
+			ms.SetPinnedChannels(a.client.Cache().GetAllChannels(), a.pinnedChannels, a.readTimestamps)
+		}
+
+		// Also trigger a fresh fetch to be sure
+		fetchCmd := func() tea.Msg {
+			channels, err := a.client.GetChannels(a.config.Channels.Types, a.pinnedChannels)
+			if err != nil {
+				return pollErrorMsg{err: err, source: "channel_list"}
+			}
+			return channelListRefreshMsg{channels: channels}
+		}
+		return a, fetchCmd
+
 	case screen.OpenThreadMsg:
-		threadScreen := screen.NewThreadScreen(a.client, a.formatter, msg.ChannelID, msg.ChannelName, msg.ThreadTS, msg.ParentMsg)
+		threadScreen := screen.NewThreadScreen(a.client, a.formatter, msg.ChannelID, msg.ChannelName, msg.ThreadTS, msg.ParentMsg, a.readTimestamps[msg.ChannelID])
 		cmd := a.pushScreen(threadScreen)
 		pollCmd := a.startThreadPolling(msg.ChannelID, msg.ThreadTS)
 		return a, tea.Batch(cmd, pollCmd)
@@ -338,10 +399,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for len(a.stack) > 1 {
 			a.stack = a.stack[:len(a.stack)-1]
 		}
-		chatScreen := screen.NewChatScreen(a.client, a.formatter, msg.ChannelID, "#"+msg.ChannelName)
+		chatScreen := screen.NewChatScreen(a.client, a.formatter, msg.ChannelID, "#"+msg.ChannelName, a.readTimestamps[msg.ChannelID])
 		cmd := a.pushScreen(chatScreen)
 		pollCmd := a.startChannelPolling(msg.ChannelID)
 		return a, tea.Batch(cmd, pollCmd)
+
+	case screen.UpdateReadTimestampMsg:
+		if a.readTimestamps == nil {
+			a.readTimestamps = make(map[string]string)
+		}
+		if msg.Timestamp > a.readTimestamps[msg.ChannelID] {
+			a.readTimestamps[msg.ChannelID] = msg.Timestamp
+			a.saveUIState()
+
+			// Propagate back to sidebar
+			if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
+				ms.SetReadTimestamps(a.readTimestamps)
+			}
+		}
+		return a, nil
 
 	case pollTickMsg:
 		return a.handlePollTick(msg)
@@ -352,10 +428,26 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if chatScreen != nil {
 			chatScreen.SetMessages(msg.messages)
 		}
+
+		// Update LatestTS in cache and propagate to sidebar
+		if len(msg.messages) > 0 {
+			latestTS := msg.messages[len(msg.messages)-1].Timestamp
+			if ch := a.client.Cache().GetChannel(msg.channelID); ch != nil {
+				if latestTS > ch.LatestTS {
+					ch.LatestTS = latestTS
+					// Refresh sidebar if it's showing this channel
+					if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
+						ms.SetPinnedChannels(a.client.Cache().GetAllChannels(), a.pinnedChannels, a.readTimestamps)
+					}
+				}
+			}
+		}
+
 		// Only mark as read if the chat screen is the active (top) screen
 		if chatScreen != nil && a.activeScreen() == chatScreen && len(msg.messages) > 0 {
 			latestTS := msg.messages[len(msg.messages)-1].Timestamp
-			slog.Debug("marking channel as read", "channel", msg.channelID, "ts", latestTS)
+			slog.Debug("new messages arrived", "channel", msg.channelID, "latest", latestTS)
+
 			markCmd := func() tea.Msg {
 				_ = a.client.MarkChannel(msg.channelID, latestTS)
 				return nil
@@ -388,8 +480,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case channelListPollTickMsg:
 		slog.Debug("channel list poll tick fired")
+		
+		// Collect priority IDs: pinned channels + current mentions in sidebar
+		priorityIDs := make([]string, 0, len(a.pinnedChannels))
+		priorityIDs = append(priorityIDs, a.pinnedChannels...)
+		if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
+			for _, r := range ms.Results() {
+				priorityIDs = append(priorityIDs, r.ChannelID)
+			}
+		}
+
 		fetchCmd := func() tea.Msg {
-			channels, err := a.client.GetChannels(a.config.Channels.Types)
+			channels, err := a.client.GetChannels(a.config.Channels.Types, priorityIDs)
 			if err != nil {
 				slog.Error("channel list poll fetch failed", "error", err)
 				return pollErrorMsg{err: err, source: "channel_list"}
@@ -407,6 +509,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		slog.Info("channel list refreshed", "total", len(msg.channels), "with_unread", unreadCount)
+
+		// Update sidebar with merged state from cache
+		if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
+			ms.SetPinnedChannels(a.client.Cache().GetAllChannels(), a.pinnedChannels, a.readTimestamps)
+		}
+
+		// Update channels screen if it's in the stack
+		for _, s := range a.stack {
+			if cs, ok := s.(*screen.ChannelsScreen); ok {
+				cs.SetChannels(a.client.Cache().GetAllChannels(), a.pinnedChannels, a.readTimestamps)
+			}
+		}
+
 		// Update unread count on chat screen if active
 		if chatScreen, ok := a.activeScreen().(*screen.ChatScreen); ok {
 			total := 0
@@ -435,6 +550,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case mentionsRefreshMsg:
 		slog.Info("mentions refreshed", "count", len(msg.results))
 		if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
+			ms.SetReadTimestamps(a.readTimestamps)
 			ms.SetMentions(msg.results)
 			ms.SetLastPoll(time.Now())
 		}
@@ -467,14 +583,29 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			newScreen, cmd := a.stack[0].Update(msg)
 			a.stack[0] = newScreen
 
-			// Auto-load channel when cursor moves to a different mention
+			// Auto-load channel when cursor moves
 			if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
 				if newID := ms.SelectedChannelID(); newID != "" && newID != prevChannelID {
-					r := ms.SelectedResult()
 					a.stack = a.stack[:1]
-					chatScreen := screen.NewChatScreen(a.client, a.formatter, r.ChannelID, "#"+r.ChannelName)
+					
+					// It could be a pinned channel or a mention result
+					var name string
+					isIM := false
+					if ch := ms.SelectedChannel(); ch != nil {
+						name = ch.Name
+						isIM = ch.IsIM
+					} else if r := ms.SelectedResult(); r != nil {
+						name = r.ChannelName
+						isIM = r.IsIM
+					}
+
+					prefix := "#"
+					if isIM {
+						prefix = "@"
+					}
+					chatScreen := screen.NewChatScreen(a.client, a.formatter, newID, prefix+name, a.readTimestamps[newID])
 					initCmd := a.pushScreen(chatScreen)
-					pollCmd := a.startChannelPolling(r.ChannelID)
+					pollCmd := a.startChannelPolling(newID)
 					return a, tea.Batch(cmd, initCmd, pollCmd)
 				}
 			}

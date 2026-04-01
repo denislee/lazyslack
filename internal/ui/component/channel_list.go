@@ -15,7 +15,8 @@ import (
 )
 
 type ChannelItem struct {
-	Channel slack.Channel
+	Channel  slack.Channel
+	IsUnread bool
 }
 
 func (c ChannelItem) FilterValue() string { return c.Channel.Name }
@@ -45,45 +46,41 @@ func (d channelDelegate) Render(w io.Writer, m list.Model, index int, listItem l
 	}
 
 	name := ch.Name
-	nameStyle := lipgloss.NewStyle()
-	if ch.UnreadCount > 0 {
-		nameStyle = nameStyle.Bold(true)
-	}
-
 	badge := ""
-	if ch.UnreadCount > 0 {
+	if item.IsUnread && ch.UnreadCount > 0 {
 		badge = fmt.Sprintf(" %d", ch.UnreadCount)
 	}
 
 	// Truncate name so the whole line fits in m.Width()
 	// Layout: "> " or "  " (2) + prefix + name + badge
 	prefixW := runewidth.StringWidth(prefix)
-	maxName := m.Width() - 2 - prefixW - len(badge) - 2 // extra margin for list chrome
+	maxName := m.Width() - 2 - prefixW - lipgloss.Width(badge) - 2 // extra margin for list chrome
 	if maxName < 1 {
 		maxName = 1
 	}
 	name = runewidth.Truncate(name, maxName, "…")
 
-	// Render badge with style after truncation
-	if badge != "" {
-		badge = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("33")).
-			Bold(true).
-			Render(badge)
+	style := lipgloss.NewStyle()
+	if item.IsUnread {
+		style = style.Foreground(lipgloss.Color("255")).Bold(true)
+	} else {
+		style = style.Foreground(lipgloss.Color("244"))
 	}
 
 	if index == m.Index() {
-		nameStyle = nameStyle.Foreground(lipgloss.Color("170")).Bold(true)
-		fmt.Fprintf(w, "> %s%s%s", prefixStyle.Render(prefix), nameStyle.Render(name), badge)
+		style = style.Foreground(lipgloss.Color("170")).Bold(true)
+		fmt.Fprintf(w, "> %s%s", prefixStyle.Render(prefix), style.Render(name+badge))
 	} else {
-		fmt.Fprintf(w, "  %s%s%s", prefixStyle.Render(prefix), nameStyle.Render(name), badge)
+		fmt.Fprintf(w, "  %s%s", prefixStyle.Render(prefix), style.Render(name+badge))
 	}
 }
 
 type ChannelList struct {
-	list        list.Model
-	allChannels []slack.Channel
-	unreadOnly  bool
+	list           list.Model
+	allChannels    []slack.Channel
+	pinnedIDs      []string
+	readTimestamps map[string]string
+	unreadOnly     bool
 }
 
 func NewChannelList(width, height int, unreadOnly bool) ChannelList {
@@ -118,9 +115,15 @@ func NewChannelList(width, height int, unreadOnly bool) ChannelList {
 	return ChannelList{list: l, unreadOnly: unreadOnly}
 }
 
-func (c *ChannelList) SetChannels(channels []slack.Channel) {
+func (c *ChannelList) SetChannels(channels []slack.Channel, pinnedIDs []string, readTimestamps map[string]string) {
 	c.allChannels = channels
+	c.pinnedIDs = pinnedIDs
+	c.readTimestamps = readTimestamps
 	c.applyFilter()
+}
+
+func (c *ChannelList) AllChannels() []slack.Channel {
+	return c.allChannels
 }
 
 func (c *ChannelList) ToggleUnreadOnly() {
@@ -137,38 +140,80 @@ func (c *ChannelList) applyFilter() {
 	if c.unreadOnly {
 		filtered := make([]slack.Channel, 0)
 		for _, ch := range channels {
-			if ch.UnreadCount > 0 {
+			isUnread := false
+			if c.readTimestamps != nil {
+				localTS := c.readTimestamps[ch.ID]
+				if ch.LatestTS != "" && (localTS == "" || ch.LatestTS > localTS) {
+					isUnread = true
+				} else if ch.UnreadCount > 0 && localTS == "" {
+					isUnread = true
+				}
+			}
+			if isUnread {
 				filtered = append(filtered, ch)
 			}
 		}
 		channels = filtered
 	}
 
-	// Partition: unread channels first, then the rest
-	var unread, read []slack.Channel
+	pinnedMap := make(map[string]bool)
+	for _, id := range c.pinnedIDs {
+		pinnedMap[id] = true
+	}
+
+	var pinnedUnread, pinnedRead, unread, read []slack.Channel
 	for _, ch := range channels {
-		if ch.UnreadCount > 0 {
-			unread = append(unread, ch)
+		isPinned := pinnedMap[ch.ID]
+		isUnread := false
+		if c.readTimestamps != nil {
+			localTS := c.readTimestamps[ch.ID]
+			if ch.LatestTS != "" && (localTS == "" || ch.LatestTS > localTS) {
+				isUnread = true
+			} else if ch.UnreadCount > 0 && localTS == "" {
+				isUnread = true
+			}
+		}
+
+		if isPinned {
+			if isUnread {
+				pinnedUnread = append(pinnedUnread, ch)
+			} else {
+				pinnedRead = append(pinnedRead, ch)
+			}
 		} else {
-			read = append(read, ch)
+			if isUnread {
+				unread = append(unread, ch)
+			} else {
+				read = append(read, ch)
+			}
 		}
 	}
 
 	ordered := make([]slack.Channel, 0, len(channels))
+	ordered = append(ordered, pinnedUnread...)
+	ordered = append(ordered, pinnedRead...)
 	ordered = append(ordered, unread...)
 	ordered = append(ordered, read...)
 
 	slog.Debug("channel list applyFilter",
 		"total_input", len(c.allChannels),
 		"unread_only", c.unreadOnly,
+		"pinned", len(pinnedUnread)+len(pinnedRead),
 		"after_filter", len(channels),
-		"unread", len(unread),
-		"read", len(read),
 	)
 
 	items := make([]list.Item, len(ordered))
 	for i, ch := range ordered {
-		items[i] = ChannelItem{Channel: ch}
+		isUnread := false
+		if c.readTimestamps != nil {
+			localTS := c.readTimestamps[ch.ID]
+			if ch.LatestTS != "" && (localTS == "" || ch.LatestTS > localTS) {
+				isUnread = true
+			} else if ch.UnreadCount > 0 && localTS == "" {
+				isUnread = true
+			}
+		}
+		items[i] = ChannelItem{Channel: ch, IsUnread: isUnread}
 	}
 	c.list.SetItems(items)
 }

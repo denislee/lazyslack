@@ -6,6 +6,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/atotto/clipboard"
 
 	"github.com/user/lazyslack/internal/slack"
 	"github.com/user/lazyslack/internal/ui/component"
@@ -18,6 +19,11 @@ const (
 	focusComposer
 )
 
+type UpdateReadTimestampMsg struct {
+	ChannelID string
+	Timestamp string
+}
+
 type ChatScreen struct {
 	messageList    component.MessageList
 	composer       component.Composer
@@ -27,22 +33,25 @@ type ChatScreen struct {
 	formatter      *slack.Formatter
 	channelID      string
 	channelName    string
+	readTimestamp  string
 	focus          chatFocus
 	width          int
 	height         int
 }
 
-func NewChatScreen(client *slack.Client, formatter *slack.Formatter, channelID, channelName string) *ChatScreen {
+func NewChatScreen(client *slack.Client, formatter *slack.Formatter, channelID, channelName string, readTimestamp string) *ChatScreen {
 	s := &ChatScreen{
-		messageList: component.NewMessageList(formatter, 80, 15),
-		composer:    component.NewComposer(80),
-		statusBar:   component.NewStatusBar(),
-		client:      client,
-		formatter:   formatter,
-		channelID:   channelID,
-		channelName: channelName,
-		focus:       focusMessages,
+		messageList:   component.NewMessageList(formatter, 80, 15),
+		composer:      component.NewComposer(80),
+		statusBar:     component.NewStatusBar(),
+		client:        client,
+		formatter:     formatter,
+		channelID:     channelID,
+		channelName:   channelName,
+		readTimestamp: readTimestamp,
+		focus:         focusMessages,
 	}
+	s.messageList.SetChannel(channelID, readTimestamp)
 	s.statusBar.SetChannel(channelName)
 	return s
 }
@@ -51,18 +60,31 @@ func (s *ChatScreen) ChannelID() string    { return s.channelID }
 func (s *ChatScreen) InInsertMode() bool   { return s.focus == focusComposer }
 
 func (s *ChatScreen) Init() tea.Cmd {
-	return func() tea.Msg {
+	var cmds []tea.Cmd
+
+	// 1. Load from cache immediately
+	if cachedMsgs, err := s.client.Cache().LoadMessagesFromDisk(s.channelID); err == nil && len(cachedMsgs) > 0 {
+		cmds = append(cmds, func() tea.Msg {
+			return chatMessagesMsg{channelID: s.channelID, messages: cachedMsgs, isCached: true}
+		})
+	}
+
+	// 2. Fetch fresh messages in background
+	cmds = append(cmds, func() tea.Msg {
 		msgs, err := s.client.GetMessages(s.channelID, 50, "")
 		if err != nil {
 			return chatErrorMsg{err: err}
 		}
-		return chatMessagesMsg{channelID: s.channelID, messages: msgs}
-	}
+		return chatMessagesMsg{channelID: s.channelID, messages: msgs, isCached: false}
+	})
+
+	return tea.Batch(cmds...)
 }
 
 type chatMessagesMsg struct {
 	channelID string
 	messages  []slack.Message
+	isCached  bool
 }
 
 type chatErrorMsg struct {
@@ -86,8 +108,16 @@ func (s *ChatScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 
 	case chatMessagesMsg:
 		if msg.channelID == s.channelID {
-			s.messageList.SetMessages(msg.messages)
-			s.messageList.ScrollToBottom()
+			if msg.isCached {
+				s.messageList.SetMessages(msg.messages)
+				s.messageList.ScrollToBottom()
+			} else {
+				// Merge fresh messages with current (possibly cached) messages
+				current := s.messageList.Messages()
+				merged := s.client.MergeMessages(current, msg.messages)
+				s.messageList.SetMessages(merged)
+				s.messageList.ScrollToBottom()
+			}
 		}
 		return s, nil
 
@@ -129,31 +159,54 @@ func (s *ChatScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			return s.handleComposerKey(msg)
 		}
 		return s.handleNormalKey(msg)
+
+	case tea.PasteMsg:
+		if s.focus == focusComposer {
+			cmd := s.composer.Update(msg)
+			return s, cmd
+		}
 	}
 
 	return s, nil
 }
 
+func (s *ChatScreen) checkReadStatus() tea.Cmd {
+	focused := s.messageList.FocusedMessage()
+	if focused != nil && (s.readTimestamp == "" || focused.Timestamp > s.readTimestamp) {
+		s.readTimestamp = focused.Timestamp
+		s.messageList.SetReadTimestamp(s.readTimestamp)
+		return func() tea.Msg {
+			return UpdateReadTimestampMsg{
+				ChannelID: s.channelID,
+				Timestamp: s.readTimestamp,
+			}
+		}
+	}
+	return nil
+}
+
 func (s *ChatScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
+	var cmds []tea.Cmd
+
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+[", "h"))):
 		return s, func() tea.Msg { return GoBackMsg{} }
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("j", "down", "ctrl+n"))):
 		s.messageList.MoveDown()
-		return s, nil
+		cmds = append(cmds, s.checkReadStatus())
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("k", "up", "ctrl+p"))):
 		s.messageList.MoveUp()
-		return s, nil
+		cmds = append(cmds, s.checkReadStatus())
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("g"))):
 		s.messageList.GoToTop()
-		return s, nil
+		cmds = append(cmds, s.checkReadStatus())
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("G"))):
 		s.messageList.GoToBottom()
-		return s, nil
+		cmds = append(cmds, s.checkReadStatus())
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("i"))):
 		s.focus = focusComposer
@@ -204,6 +257,18 @@ func (s *ChatScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		}
 		return s, nil
 
+	case key.Matches(msg, key.NewBinding(key.WithKeys("y"))):
+		focused := s.messageList.FocusedMessage()
+		if focused != nil {
+			err := clipboard.WriteAll(focused.Text)
+			if err != nil {
+				s.statusBar.SetError("Failed to copy to clipboard")
+			} else {
+				s.statusBar.SetStatus("Copied to clipboard")
+			}
+		}
+		return s, nil
+
 	case key.Matches(msg, key.NewBinding(key.WithKeys("+", "r"))):
 		if s.messageList.FocusedMessage() != nil {
 			picker := component.NewReactionPicker(s.width, s.height)
@@ -214,14 +279,14 @@ func (s *ChatScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+d", "ctrl+f", "pgdown"))):
 		s.messageList.PageDown()
-		return s, nil
+		cmds = append(cmds, s.checkReadStatus())
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+u", "ctrl+b", "pgup"))):
 		s.messageList.PageUp()
-		return s, nil
+		cmds = append(cmds, s.checkReadStatus())
 	}
 
-	return s, nil
+	return s, tea.Batch(cmds...)
 }
 
 func (s *ChatScreen) handleComposerKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
@@ -328,6 +393,7 @@ func (s *ChatScreen) ShortHelp() []key.Binding {
 		key.NewBinding(key.WithKeys("j/k"), key.WithHelp("j/k", "navigate")),
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open link/thread")),
 		key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "reply")),
+		key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yank")),
 		key.NewBinding(key.WithKeys("r"), key.WithHelp("r/+", "react")),
 		key.NewBinding(key.WithKeys("escape", "ctrl+["), key.WithHelp("esc", "back")),
 	}

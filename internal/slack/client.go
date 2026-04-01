@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 
@@ -26,6 +27,28 @@ var slackErrors = map[string]string{
 	"already_reacted":                     "You already reacted with this emoji",
 	"no_reaction":                         "You haven't reacted with this emoji",
 	"too_many_reactions":                  "Too many reactions on this message",
+}
+
+func (c *Client) MergeMessages(a, b []Message) []Message {
+	m := make(map[string]Message)
+	for _, msg := range a {
+		m[msg.Timestamp] = msg
+	}
+	for _, msg := range b {
+		m[msg.Timestamp] = msg
+	}
+
+	merged := make([]Message, 0, len(m))
+	for _, msg := range m {
+		merged = append(merged, msg)
+	}
+
+	// Sort by timestamp
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Timestamp < merged[j].Timestamp
+	})
+
+	return merged
 }
 
 func friendlyError(err error) error {
@@ -80,8 +103,8 @@ func (c *Client) Cache() *Cache {
 	return c.cache
 }
 
-func (c *Client) GetChannels(types []string) ([]Channel, error) {
-	slog.Debug("GetChannels starting", "types", types)
+func (c *Client) GetChannels(types []string, priorityIDs []string) ([]Channel, error) {
+	slog.Debug("GetChannels starting", "types", types, "priority", len(priorityIDs))
 	var allChannels []Channel
 	cursor := ""
 	page := 0
@@ -115,7 +138,7 @@ func (c *Client) GetChannels(types []string) ([]Channel, error) {
 				}
 			}
 
-			allChannels = append(allChannels, Channel{
+			c := Channel{
 				ID:        ch.ID,
 				Name:      name,
 				IsIM:      ch.IsIM,
@@ -123,7 +146,11 @@ func (c *Client) GetChannels(types []string) ([]Channel, error) {
 				IsPrivate: ch.IsPrivate,
 				Topic:     ch.Topic.Value,
 				Purpose:   ch.Purpose.Value,
-			})
+			}
+			if ch.Latest != nil {
+				c.LatestTS = ch.Latest.Timestamp
+			}
+			allChannels = append(allChannels, c)
 		}
 
 		if nextCursor == "" {
@@ -136,7 +163,7 @@ func (c *Client) GetChannels(types []string) ([]Channel, error) {
 
 	// conversations.list doesn't reliably return unread counts.
 	// Enrich with conversations.info which always includes them.
-	c.enrichWithUnreadCounts(allChannels)
+	c.enrichWithUnreadCounts(allChannels, priorityIDs)
 
 	unreadCount := 0
 	for _, ch := range allChannels {
@@ -154,11 +181,23 @@ func (c *Client) GetChannels(types []string) ([]Channel, error) {
 // enrichWithUnreadCounts calls conversations.info for each channel to get
 // reliable unread counts. Uses concurrent workers with a semaphore.
 // The slack-go library handles rate-limit retries automatically.
-func (c *Client) enrichWithUnreadCounts(channels []Channel) {
+func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 10) // 10 concurrent workers
 
+	priorityMap := make(map[string]bool)
+	for _, id := range priorityIDs {
+		priorityMap[id] = true
+	}
+
 	for i := range channels {
+		// Only enrich if it's in priority list OR if it already claims to have unreads
+		// Or if we don't have many channels.
+		isPriority := priorityMap[channels[i].ID] || channels[i].UnreadCount > 0
+		if len(channels) > 50 && !isPriority {
+			continue
+		}
+
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
@@ -174,6 +213,9 @@ func (c *Client) enrichWithUnreadCounts(channels []Channel) {
 			}
 			channels[idx].UnreadCount = info.UnreadCountDisplay
 			channels[idx].LastReadTS = info.LastRead
+			if info.Latest != nil {
+				channels[idx].LatestTS = info.Latest.Timestamp
+			}
 		}(i)
 	}
 	wg.Wait()
@@ -204,6 +246,7 @@ func (c *Client) GetMessages(channelID string, limit int, oldest string) ([]Mess
 	}
 
 	c.cache.SetMessages(channelID, messages)
+	_ = c.cache.SaveMessagesToDisk(channelID, messages)
 	return messages, nil
 }
 
@@ -222,6 +265,8 @@ func (c *Client) GetThreadReplies(channelID, threadTS string) ([]Message, error)
 	}
 
 	c.cache.SetThread(channelID, threadTS, replies)
+	threadKey := channelID + ":" + threadTS
+	_ = c.cache.SaveMessagesToDisk(threadKey, replies)
 	return replies, nil
 }
 
@@ -326,11 +371,18 @@ func (c *Client) ResolveUser(userID string) (*User, error) {
 		return nil, fmt.Errorf("get user: %w", err)
 	}
 
+	presence := "away"
+	p, err := c.api.GetUserPresence(userID)
+	if err == nil {
+		presence = p.Presence
+	}
+
 	user := &User{
 		ID:          info.ID,
 		Name:        info.Name,
 		DisplayName: info.Profile.DisplayName,
 		IsBot:       info.IsBot,
+		Presence:    presence,
 		StatusEmoji: info.Profile.StatusEmoji,
 		StatusText:  info.Profile.StatusText,
 	}
@@ -401,7 +453,11 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 
 	text := msg.Text
 	if text == "" {
-		text = c.extractAttachmentText(msg.Attachments)
+		if len(msg.Blocks.BlockSet) > 0 {
+			text = c.extractBlockText(msg.Blocks.BlockSet)
+		} else {
+			text = c.extractAttachmentText(msg.Attachments)
+		}
 	}
 
 	return Message{
@@ -416,6 +472,36 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 		Files:      files,
 		IsBot:      msg.BotID != "",
 	}
+}
+
+func (c *Client) extractBlockText(blocks []slackapi.Block) string {
+	var parts []string
+	for _, b := range blocks {
+		switch blk := b.(type) {
+		case *slackapi.SectionBlock:
+			if blk.Text != nil {
+				parts = append(parts, blk.Text.Text)
+			}
+			for _, f := range blk.Fields {
+				parts = append(parts, f.Text)
+			}
+		case *slackapi.ContextBlock:
+			for _, el := range blk.ContextElements.Elements {
+				if txt, ok := el.(*slackapi.TextBlockObject); ok {
+					parts = append(parts, txt.Text)
+				}
+			}
+		case *slackapi.HeaderBlock:
+			if blk.Text != nil {
+				parts = append(parts, blk.Text.Text)
+			}
+		case *slackapi.RichTextBlock:
+			// Rich text is complex, but often has a raw text fallback or we can simplify
+			// For now, we'll try to get some text out of it if possible
+			// The slack-go library's RichTextBlock is a bit nested.
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (c *Client) extractAttachmentText(attachments []slackapi.Attachment) string {
