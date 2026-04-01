@@ -173,12 +173,12 @@ func (c *Client) GetChannels(types []string, priorityIDs []string) ([]Channel, e
 	}
 	slog.Info("GetChannels done", "total", len(allChannels), "with_unread", unreadCount)
 
-	s.cache.SetChannels(allChannels)
+	c.cache.SetChannels(allChannels)
 	_ = c.cache.SaveChannelsToDisk(allChannels) // Best-effort caching
 	return allChannels, nil
-	}
+}
 
-	func (c *Client) GetUnreadCounts(ids []string) ([]Channel, error) {
+func (c *Client) GetUnreadCounts(ids []string) ([]Channel, error) {
 	channels := make([]Channel, 0, len(ids))
 	for _, id := range ids {
 		ch := c.cache.GetChannel(id)
@@ -202,9 +202,9 @@ func (c *Client) GetChannels(types []string, priorityIDs []string) ([]Channel, e
 	}
 
 	return channels, nil
-	}
+}
 
-	// enrichWithUnreadCounts calls conversations.info for each channel to get
+// enrichWithUnreadCounts calls conversations.info for each channel to get
 // reliable unread counts. Uses concurrent workers with a semaphore.
 // The slack-go library handles rate-limit retries automatically.
 func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string) {
@@ -411,6 +411,10 @@ func (c *Client) ResolveUser(userID string) (*User, error) {
 		Presence:    presence,
 		StatusEmoji: info.Profile.StatusEmoji,
 		StatusText:  info.Profile.StatusText,
+		Title:       info.Profile.Title,
+		Email:       info.Profile.Email,
+		Phone:       info.Profile.Phone,
+		Timezone:    info.TZ,
 	}
 	if user.DisplayName == "" {
 		user.DisplayName = info.RealName

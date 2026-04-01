@@ -14,19 +14,21 @@ import (
 )
 
 type ThreadScreen struct {
-	messageList   component.MessageList
-	composer      component.Composer
-	statusBar     component.StatusBar
-	client        *slack.Client
-	formatter     *slack.Formatter
-	channelID     string
-	channelName   string
-	threadTS      string
-	readTimestamp string
-	parentMsg     slack.Message
-	focus         chatFocus
-	width         int
-	height        int
+	messageList    component.MessageList
+	composer       component.Composer
+	statusBar      component.StatusBar
+	profilePanel   component.UserProfilePanel
+	profileVisible bool
+	client         *slack.Client
+	formatter      *slack.Formatter
+	channelID      string
+	channelName    string
+	threadTS       string
+	readTimestamp  string
+	parentMsg      slack.Message
+	focus          chatFocus
+	width          int
+	height         int
 }
 
 func NewThreadScreen(client *slack.Client, formatter *slack.Formatter, channelID, channelName, threadTS string, parentMsg slack.Message, readTimestamp string) *ThreadScreen {
@@ -141,11 +143,89 @@ func (s *ThreadScreen) checkReadStatus() tea.Cmd {
 	return nil
 }
 
+func (s *ThreadScreen) updateProfilePanel() {
+	if !s.profileVisible {
+		return
+	}
+	focused := s.messageList.FocusedMessage()
+	if focused == nil {
+		return
+	}
+	user, err := s.client.ResolveUser(focused.UserID)
+	if err != nil {
+		return
+	}
+	s.profilePanel.SetUser(user)
+}
+
+func (s *ThreadScreen) profilePanelWidth() int {
+	pw := s.width / 3
+	if pw < 28 {
+		pw = 28
+	}
+	if pw > 40 {
+		pw = 40
+	}
+	return pw
+}
+
+func (s *ThreadScreen) mainWidth() int {
+	if s.profileVisible {
+		return s.width - s.profilePanelWidth()
+	}
+	return s.width
+}
+
+func (s *ThreadScreen) handleProfileKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
+	switch {
+	case key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+[", "h"))):
+		s.profileVisible = false
+		s.recalcSizes()
+		return s, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("j", "down"))):
+		s.profilePanel.MoveDown()
+		return s, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("k", "up"))):
+		s.profilePanel.MoveUp()
+		return s, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("y"))):
+		val := s.profilePanel.FocusedValue()
+		if val != "" {
+			err := clipboard.WriteAll(val)
+			if err != nil {
+				s.statusBar.SetError("Failed to copy to clipboard")
+			} else {
+				s.statusBar.SetStatus("Copied to clipboard")
+			}
+		}
+		return s, nil
+	}
+
+	return s, nil
+}
+
 func (s *ThreadScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
+	if s.profileVisible {
+		return s.handleProfileKey(msg)
+	}
+
 	var cmds []tea.Cmd
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+[", "h"))):
 		return s, func() tea.Msg { return GoBackMsg{} }
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("l"))):
+		focused := s.messageList.FocusedMessage()
+		if focused == nil {
+			return s, nil
+		}
+		s.profileVisible = true
+		s.recalcSizes()
+		s.updateProfilePanel()
+		return s, nil
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("j", "down", "ctrl+n"))):
 		s.messageList.MoveDown()
@@ -227,6 +307,8 @@ func (s *ThreadScreen) handleComposerKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) 
 }
 
 func (s *ThreadScreen) View() string {
+	mw := s.mainWidth()
+
 	header := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("33")).
@@ -234,7 +316,7 @@ func (s *ThreadScreen) View() string {
 		Render(fmt.Sprintf("Thread in %s", s.channelName))
 
 	headerBar := lipgloss.NewStyle().
-		Width(s.width).
+		Width(mw).
 		BorderBottom(true).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color("240")).
@@ -247,28 +329,42 @@ func (s *ThreadScreen) View() string {
 			Render(" -- INSERT --")
 	}
 
-	return headerBar + "\n" +
+	main := headerBar + "\n" +
 		s.messageList.View() + "\n" +
 		s.composer.View() + modeIndicator + "\n" +
 		s.statusBar.View()
+
+	if !s.profileVisible {
+		return main
+	}
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, main, s.profilePanel.View())
 }
 
 func (s *ThreadScreen) SetSize(w, h int) {
 	s.width = w
 	s.height = h
+	s.recalcSizes()
+}
+
+func (s *ThreadScreen) recalcSizes() {
+	mw := s.mainWidth()
 	composerHeight := 3
 	if s.focus == focusComposer {
 		composerHeight = 5
 	}
 	statusHeight := 1
 	headerHeight := 2
-	msgHeight := h - composerHeight - statusHeight - headerHeight
+	msgHeight := s.height - composerHeight - statusHeight - headerHeight
 	if msgHeight < 3 {
 		msgHeight = 3
 	}
-	s.messageList.SetSize(w, msgHeight)
-	s.composer.SetWidth(w)
-	s.statusBar.SetWidth(w)
+	s.messageList.SetSize(mw, msgHeight)
+	s.composer.SetWidth(mw)
+	s.statusBar.SetWidth(mw)
+	if s.profileVisible {
+		s.profilePanel.SetSize(s.profilePanelWidth(), s.height)
+	}
 }
 
 func (s *ThreadScreen) ShortHelp() []key.Binding {
@@ -278,8 +374,17 @@ func (s *ThreadScreen) ShortHelp() []key.Binding {
 			key.NewBinding(key.WithKeys("escape", "ctrl+["), key.WithHelp("esc", "cancel")),
 		}
 	}
+	if s.profileVisible {
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "reply")),
+			key.NewBinding(key.WithKeys("j/k"), key.WithHelp("j/k", "navigate")),
+			key.NewBinding(key.WithKeys("h"), key.WithHelp("h", "close profile")),
+			key.NewBinding(key.WithKeys("escape", "ctrl+["), key.WithHelp("esc", "close profile")),
+		}
+	}
 	return []key.Binding{
 		key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "reply")),
+		key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "profile")),
 		key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yank")),
 		key.NewBinding(key.WithKeys("j/k"), key.WithHelp("j/k", "navigate")),
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open link")),

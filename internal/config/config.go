@@ -21,6 +21,7 @@ type Config struct {
 type PollConfig struct {
 	ActiveChannel  time.Duration
 	ChannelList    time.Duration
+	Priority       time.Duration
 	Thread         time.Duration
 	IdleMultiplier int
 }
@@ -49,6 +50,7 @@ type fileConfig struct {
 type filePollConfig struct {
 	ActiveChannel  int `toml:"active_channel"`
 	ChannelList    int `toml:"channel_list"`
+	Priority       int `toml:"priority"`
 	Thread         int `toml:"thread"`
 	IdleMultiplier int `toml:"idle_multiplier"`
 }
@@ -72,7 +74,8 @@ func defaults() Config {
 	return Config{
 		Polling: PollConfig{
 			ActiveChannel:  3 * time.Second,
-			ChannelList:    30 * time.Second,
+			ChannelList:    5 * time.Minute, // Slow full refresh
+			Priority:       5 * time.Second,  // Fast favorite refresh
 			Thread:         5 * time.Second,
 			IdleMultiplier: 2,
 		},
@@ -126,6 +129,9 @@ func loadFromFile(cfg *Config, path string) {
 	}
 	if fc.Polling.ChannelList > 0 {
 		cfg.Polling.ChannelList = time.Duration(fc.Polling.ChannelList) * time.Second
+	}
+	if fc.Polling.Priority > 0 {
+		cfg.Polling.Priority = time.Duration(fc.Polling.Priority) * time.Second
 	}
 	if fc.Polling.Thread > 0 {
 		cfg.Polling.Thread = time.Duration(fc.Polling.Thread) * time.Second

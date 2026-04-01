@@ -41,6 +41,10 @@ type User struct {
 	Presence    string // "active" or "away"
 	StatusEmoji string
 	StatusText  string
+	Title       string
+	Email       string
+	Phone       string
+	Timezone    string
 }
 
 type File struct {

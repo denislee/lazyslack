@@ -99,6 +99,7 @@ func (a *App) Init() tea.Cmd {
 	})
 
 	cmds = append(cmds, a.startChannelListPolling())
+	cmds = append(cmds, a.startPriorityPolling())
 	cmds = append(cmds, a.startMentionsPolling())
 	// Fetch usergroups in background for resolving <!subteam^...> mentions
 	cmds = append(cmds, func() tea.Msg {
@@ -465,17 +466,27 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case priorityUnreadPollTickMsg:
+		slog.Debug("priority unread poll tick fired")
+		priorityIDs := a.getPriorityIDs()
+		if len(priorityIDs) == 0 {
+			return a, a.startPriorityPolling()
+		}
+
+		fetchCmd := func() tea.Msg {
+			channels, err := a.client.GetUnreadCounts(priorityIDs)
+			if err != nil {
+				slog.Error("priority unread poll fetch failed", "error", err)
+				return nil // Don't crash for background error
+			}
+			return channelListRefreshMsg{channels: channels}
+		}
+		return a, tea.Batch(fetchCmd, a.startPriorityPolling())
+
 	case channelListPollTickMsg:
 		slog.Debug("channel list poll tick fired")
 		
-		// Collect priority IDs: pinned channels + current mentions in sidebar
-		priorityIDs := make([]string, 0, len(a.pinnedChannels))
-		priorityIDs = append(priorityIDs, a.pinnedChannels...)
-		if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
-			for _, r := range ms.Results() {
-				priorityIDs = append(priorityIDs, r.ChannelID)
-			}
-		}
+		priorityIDs := a.getPriorityIDs()
 
 		fetchCmd := func() tea.Msg {
 			channels, err := a.client.GetChannels(a.config.Channels.Types, priorityIDs)
@@ -709,9 +720,17 @@ type channelListRefreshMsg struct {
 
 type mentionsPollTickMsg struct{}
 
+type priorityUnreadPollTickMsg struct{}
+
 func (a *App) startChannelListPolling() tea.Cmd {
 	return tea.Tick(a.config.Polling.ChannelList, func(t time.Time) tea.Msg {
 		return channelListPollTickMsg{}
+	})
+}
+
+func (a *App) startPriorityPolling() tea.Cmd {
+	return tea.Tick(a.config.Polling.Priority, func(t time.Time) tea.Msg {
+		return priorityUnreadPollTickMsg{}
 	})
 }
 
@@ -751,6 +770,19 @@ func (a *App) findThreadScreen(channelID, threadTS string) *screen.ThreadScreen 
 		}
 	}
 	return nil
+}
+
+func (a *App) getPriorityIDs() []string {
+	ids := make([]string, 0, len(a.pinnedChannels))
+	ids = append(ids, a.pinnedChannels...)
+	if len(a.stack) > 0 {
+		if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
+			for _, r := range ms.Results() {
+				ids = append(ids, r.ChannelID)
+			}
+		}
+	}
+	return ids
 }
 
 func (a *App) handlePollTick(msg pollTickMsg) (tea.Model, tea.Cmd) {
