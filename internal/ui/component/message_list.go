@@ -338,7 +338,7 @@ func (m *MessageList) ensureVisible() {
 		isSelected := i == m.focusedIndex
 		msgStr := m.formatMessage(&m.messages[i], isSelected)
 		focusStartLine += strings.Count(msgStr, "\n") + 1 // lines in msg
-		focusStartLine += 2                                // blank line separator between messages
+		focusStartLine += 1                                // blank line separator (\n\n) between messages
 	}
 
 	focusMsgStr := m.formatMessage(&m.messages[m.focusedIndex], true)

@@ -420,6 +420,19 @@ func (c *Client) ResolveUser(userID string) (*User, error) {
 		user.DisplayName = info.RealName
 	}
 
+	// Enrich with profile data (email, phone) from users.profile.get
+	// which may succeed with different scopes than users.info
+	if profile, err := c.api.GetUserProfile(&slackapi.GetUserProfileParameters{
+		UserID: userID,
+	}); err == nil {
+		if profile.Email != "" {
+			user.Email = profile.Email
+		}
+		if profile.Phone != "" {
+			user.Phone = profile.Phone
+		}
+	}
+
 	c.cache.SetUser(user)
 	return user, nil
 }

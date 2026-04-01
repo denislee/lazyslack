@@ -20,6 +20,7 @@ type MentionsScreen struct {
 	results        []slack.SearchResult
 	pinnedChannels []slack.Channel
 	readTimestamps map[string]string
+	profilePanel   component.UserProfilePanel
 	cursor         int
 	client         *slack.Client
 	formatter      *slack.Formatter
@@ -32,9 +33,10 @@ type MentionsScreen struct {
 
 func NewMentionsScreen(client *slack.Client, formatter *slack.Formatter) *MentionsScreen {
 	return &MentionsScreen{
-		client:    client,
-		formatter: formatter,
-		loading:   true,
+		client:       client,
+		formatter:    formatter,
+		loading:      true,
+		profilePanel: component.NewUserProfilePanel(),
 	}
 }
 
@@ -46,12 +48,14 @@ type mentionsErrorMsg struct {
 	err error
 }
 
-func (s *MentionsScreen) ChannelID() string    { return "" }
-func (s *MentionsScreen) InInsertMode() bool { return false }
+func (s *MentionsScreen) ChannelID() string { return "" }
+func (s *MentionsScreen) InInsertMode() bool {
+	return false
+}
 
 func (s *MentionsScreen) Init() tea.Cmd {
 	var cmds []tea.Cmd
-	
+
 	// Fetch mentions
 	cmds = append(cmds, func() tea.Msg {
 		results, err := s.client.Search("to:me")
@@ -95,31 +99,37 @@ func (s *MentionsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("j", "down", "ctrl+n"))):
 			if s.cursor < total-1 {
 				s.cursor++
+				s.updateProfilePanel()
 			}
 			return s, nil
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("k", "up", "ctrl+p"))):
 			if s.cursor > 0 {
 				s.cursor--
+				s.updateProfilePanel()
 			}
 			return s, nil
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("g"))):
 			s.cursor = 0
+			s.updateProfilePanel()
 			return s, nil
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("G"))):
 			s.cursor = total - 1
+			s.updateProfilePanel()
 			return s, nil
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+d", "ctrl+f", "pgdown"))):
 			page := max((s.height-2)/3, 1)
 			s.cursor = min(s.cursor+page, total-1)
+			s.updateProfilePanel()
 			return s, nil
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+u", "ctrl+b", "pgup"))):
 			page := max((s.height-2)/3, 1)
 			s.cursor = max(s.cursor-page, 0)
+			s.updateProfilePanel()
 			return s, nil
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+f"))):
@@ -164,6 +174,31 @@ func (s *MentionsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	return s, nil
 }
 
+func (s *MentionsScreen) updateProfilePanel() {
+	var userID string
+	if s.cursor < len(s.pinnedChannels) {
+		ch := s.pinnedChannels[s.cursor]
+		if ch.IsIM {
+			// Extract user ID from IM channel ID? Slack DM channel IDs start with D.
+			// We'd need to store the target UserID in the Channel struct.
+		}
+	} else {
+		idx := s.cursor - len(s.pinnedChannels)
+		if idx < len(s.results) {
+			userID = s.results[idx].Message.UserID
+		}
+	}
+
+	if userID != "" {
+		user, err := s.client.ResolveUser(userID)
+		if err == nil {
+			s.profilePanel.SetUser(user)
+		}
+	} else {
+		s.profilePanel.SetUser(nil)
+	}
+}
+
 func (s *MentionsScreen) clampCursor() {
 	total := len(s.pinnedChannels) + len(s.results)
 	if s.cursor >= total {
@@ -172,6 +207,26 @@ func (s *MentionsScreen) clampCursor() {
 }
 
 func (s *MentionsScreen) View() string {
+	content := s.renderMentions()
+
+	if s.width > 40 {
+		// Split view if wide enough
+		profileW := 30
+		mentionsW := s.width - profileW
+
+		mentionsStyle := lipgloss.NewStyle().Width(mentionsW)
+		s.profilePanel.SetSize(profileW, s.height)
+
+		return lipgloss.JoinHorizontal(lipgloss.Top,
+			mentionsStyle.Render(content),
+			s.profilePanel.View(),
+		)
+	}
+
+	return content
+}
+
+func (s *MentionsScreen) renderMentions() string {
 	var b strings.Builder
 
 	// 1. Pinned Channels
@@ -184,7 +239,7 @@ func (s *MentionsScreen) View() string {
 			if ch.IsIM {
 				prefix = "@"
 			}
-			
+
 			badge := ""
 			localTS := ""
 			if s.readTimestamps != nil {
@@ -196,7 +251,7 @@ func (s *MentionsScreen) View() string {
 				badge = fmt.Sprintf(" %d", ch.UnreadCount)
 			}
 
-			// Truncate name to fit: width - 2 (padding) - 2 (prefix) - lipgloss.Width(badge)
+			// Truncate name to fit
 			nameWidth := s.width - 4 - lipgloss.Width(badge)
 			name := truncate(ch.Name, nameWidth)
 
@@ -212,7 +267,7 @@ func (s *MentionsScreen) View() string {
 				b.WriteString(lipgloss.NewStyle().
 					Foreground(lipgloss.Color("170")).
 					Bold(true).
-					Render("> " + content) + "\n")
+					Render("> "+content) + "\n")
 			} else {
 				b.WriteString("  " + style.Render(content) + "\n")
 			}
@@ -293,7 +348,7 @@ func (s *MentionsScreen) View() string {
 				isUnread = true
 			}
 		}
-		
+
 		if isUnread {
 			chanStyle = chanStyle.Bold(true)
 		}
@@ -348,6 +403,7 @@ func (s *MentionsScreen) SetMentions(results []slack.SearchResult) {
 	})
 	s.loading = false
 	s.clampCursor()
+	s.updateProfilePanel()
 }
 
 func (s *MentionsScreen) SetPinnedChannels(channels []slack.Channel, pinnedIDs []string, readTimestamps map[string]string) {
@@ -356,7 +412,7 @@ func (s *MentionsScreen) SetPinnedChannels(channels []slack.Channel, pinnedIDs [
 	for _, id := range pinnedIDs {
 		pinnedMap[id] = true
 	}
-	
+
 	filtered := make([]slack.Channel, 0)
 	for _, ch := range channels {
 		if pinnedMap[ch.ID] {
@@ -371,6 +427,7 @@ func (s *MentionsScreen) SetPinnedChannels(channels []slack.Channel, pinnedIDs [
 
 	s.pinnedChannels = filtered
 	s.clampCursor()
+	s.updateProfilePanel()
 }
 
 func (s *MentionsScreen) SetLastPoll(t time.Time) {
