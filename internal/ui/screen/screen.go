@@ -3,6 +3,8 @@ package screen
 import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/user/lazyslack/internal/slack"
 )
 
 // Screen is the interface for all screens in the app.
@@ -13,4 +15,10 @@ type Screen interface {
 	View() string
 	SetSize(width, height int)
 	ShortHelp() []key.Binding
+	InInsertMode() bool
+}
+
+// Data refresh messages
+type MentionsRefreshMsg struct {
+	Results []slack.SearchResult
 }

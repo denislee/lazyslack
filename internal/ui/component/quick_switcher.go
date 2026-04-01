@@ -48,25 +48,32 @@ type resultEntry struct {
 	search  *slack.SearchResult // for message results
 }
 
+type quickSwitchTab int
+
+const (
+	tabChannels quickSwitchTab = iota
+	tabMessages
+)
+
 type QuickSwitcher struct {
 	input    textinput.Model
 	client   *slack.Client
 	channels []slack.Channel
 	results  []resultEntry
+	tab      quickSwitchTab
 	cursor   int
 	width    int
 	height   int
 
-	lastQuery      string
-	searchResults  []slack.SearchResult
-	searchLoading  bool
+	lastQuery     string
+	searchResults []slack.SearchResult
+	searchLoading bool
 }
 
 func NewQuickSwitcher(client *slack.Client, width, height int) *QuickSwitcher {
 	ti := textinput.New()
 	ti.Placeholder = "Jump to channel, person, or search..."
 	ti.Focus()
-	ti.SetWidth(50)
 
 	channels := client.Cache().GetAllChannels()
 
@@ -77,6 +84,7 @@ func NewQuickSwitcher(client *slack.Client, width, height int) *QuickSwitcher {
 		width:    width,
 		height:   height,
 	}
+	qs.input.SetWidth(qs.boxWidth() - 6) // box - border(2) - padding(2) - indent(2)
 	qs.filterResults()
 	return qs
 }
@@ -127,6 +135,30 @@ func (qs *QuickSwitcher) Update(msg tea.Msg) (*QuickSwitcher, tea.Cmd) {
 			}
 			return qs, nil
 
+		case key.Matches(msg, key.NewBinding(key.WithKeys("tab"))):
+			if qs.tab == tabChannels {
+				qs.tab = tabMessages
+			} else {
+				qs.tab = tabChannels
+			}
+			qs.cursor = 0
+			qs.filterResults()
+			
+			// Trigger search if switching to messages and query is long enough
+			query := strings.TrimSpace(qs.input.Value())
+			if qs.tab == tabMessages && len(query) >= 2 {
+				qs.searchLoading = true
+				searchFn := func() tea.Msg {
+					results, err := qs.client.Search(query)
+					if err != nil {
+						return quickSwitchSearchResultsMsg{query: query, results: nil}
+					}
+					return quickSwitchSearchResultsMsg{query: query, results: results}
+				}
+				return qs, searchFn
+			}
+			return qs, nil
+
 		case key.Matches(msg, key.NewBinding(key.WithKeys("down", "ctrl+n"))):
 			qs.moveDown()
 			return qs, nil
@@ -143,8 +175,8 @@ func (qs *QuickSwitcher) Update(msg tea.Msg) (*QuickSwitcher, tea.Cmd) {
 	query := strings.TrimSpace(qs.input.Value())
 	qs.filterResults()
 
-	// Async message search
-	if query != qs.lastQuery && len(query) >= 2 {
+	// Async message search (only if on Messages tab)
+	if qs.tab == tabMessages && query != qs.lastQuery && len(query) >= 2 {
 		qs.lastQuery = query
 		qs.searchLoading = true
 		searchFn := func() tea.Msg {
@@ -155,9 +187,11 @@ func (qs *QuickSwitcher) Update(msg tea.Msg) (*QuickSwitcher, tea.Cmd) {
 			return quickSwitchSearchResultsMsg{query: query, results: results}
 		}
 		return qs, tea.Batch(cmd, searchFn)
-	} else if len(query) < 2 {
+	} else if len(query) < 2 || qs.tab == tabChannels {
 		qs.lastQuery = ""
-		qs.searchResults = nil
+		if qs.tab == tabChannels {
+			qs.searchResults = nil
+		}
 		qs.searchLoading = false
 		qs.filterResults()
 	}
@@ -169,32 +203,34 @@ func (qs *QuickSwitcher) filterResults() {
 	query := strings.ToLower(strings.TrimSpace(qs.input.Value()))
 	qs.results = qs.results[:0]
 
-	// Channels
-	for i := range qs.channels {
-		ch := &qs.channels[i]
-		if ch.IsIM || ch.IsMPIM {
-			continue
+	if qs.tab == tabChannels {
+		// Channels
+		for i := range qs.channels {
+			ch := &qs.channels[i]
+			if ch.IsIM || ch.IsMPIM {
+				continue
+			}
+			if query == "" || strings.Contains(strings.ToLower(ch.Name), query) {
+				qs.results = append(qs.results, resultEntry{kind: resultChannel, channel: ch})
+			}
 		}
-		if query == "" || strings.Contains(strings.ToLower(ch.Name), query) {
-			qs.results = append(qs.results, resultEntry{kind: resultChannel, channel: ch})
-		}
-	}
 
-	// People (IMs)
-	for i := range qs.channels {
-		ch := &qs.channels[i]
-		if !ch.IsIM {
-			continue
+		// People (IMs)
+		for i := range qs.channels {
+			ch := &qs.channels[i]
+			if !ch.IsIM {
+				continue
+			}
+			if query == "" || strings.Contains(strings.ToLower(ch.Name), query) {
+				qs.results = append(qs.results, resultEntry{kind: resultPerson, channel: ch})
+			}
 		}
-		if query == "" || strings.Contains(strings.ToLower(ch.Name), query) {
-			qs.results = append(qs.results, resultEntry{kind: resultPerson, channel: ch})
+	} else {
+		// Messages from search API
+		for i := range qs.searchResults {
+			r := &qs.searchResults[i]
+			qs.results = append(qs.results, resultEntry{kind: resultMessage, search: r})
 		}
-	}
-
-	// Messages from search API
-	for i := range qs.searchResults {
-		r := &qs.searchResults[i]
-		qs.results = append(qs.results, resultEntry{kind: resultMessage, search: r})
 	}
 
 	if qs.cursor >= len(qs.results) {
@@ -217,6 +253,27 @@ func (qs *QuickSwitcher) moveUp() {
 func (qs *QuickSwitcher) View() string {
 	var b strings.Builder
 
+	// Render tabs
+	tabStyle := lipgloss.NewStyle().
+		Padding(0, 1).
+		Foreground(lipgloss.Color("240"))
+	activeTabStyle := lipgloss.NewStyle().
+		Padding(0, 1).
+		Foreground(lipgloss.Color("255")).
+		Bold(true).
+		Underline(true)
+
+	tabs := []string{"Channel + User", "Messages"}
+	var renderedTabs []string
+	for i, t := range tabs {
+		if quickSwitchTab(i) == qs.tab {
+			renderedTabs = append(renderedTabs, activeTabStyle.Render(t))
+		} else {
+			renderedTabs = append(renderedTabs, tabStyle.Render(t))
+		}
+	}
+	b.WriteString("  " + strings.Join(renderedTabs, "  ") + "\n\n")
+
 	b.WriteString("  " + qs.input.View() + "\n")
 
 	if len(qs.results) == 0 && qs.lastQuery != "" && !qs.searchLoading {
@@ -231,7 +288,7 @@ func (qs *QuickSwitcher) View() string {
 		start = qs.cursor - maxVisible + 1
 	}
 
-	boxW := qs.boxWidth() - 4 // padding
+	boxW := qs.boxWidth() - 6 // border(2) + padding(2) + indent(2)
 
 	// Track sections for headers
 	var lastKind resultKind = -1
@@ -239,16 +296,14 @@ func (qs *QuickSwitcher) View() string {
 	for i := start; i < len(qs.results) && visible < maxVisible; i++ {
 		entry := qs.results[i]
 
-		// Section header
-		if entry.kind != lastKind {
+		// Section header (only for channels tab)
+		if qs.tab == tabChannels && entry.kind != lastKind {
 			var header string
 			switch entry.kind {
 			case resultChannel:
 				header = "Channels"
 			case resultPerson:
 				header = "People"
-			case resultMessage:
-				header = "Messages"
 			}
 			headerStyle := lipgloss.NewStyle().
 				Foreground(lipgloss.Color("240")).
@@ -288,6 +343,7 @@ func (qs *QuickSwitcher) View() string {
 		qs.width, qs.height,
 		lipgloss.Center, lipgloss.Center,
 		style.Render(b.String()),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("233"))),
 	)
 }
 
@@ -340,4 +396,5 @@ func (qs *QuickSwitcher) renderEntry(entry resultEntry, maxW int) string {
 func (qs *QuickSwitcher) SetSize(w, h int) {
 	qs.width = w
 	qs.height = h
+	qs.input.SetWidth(qs.boxWidth() - 6)
 }

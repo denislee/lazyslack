@@ -145,7 +145,7 @@ func (c *ChannelList) applyFilter() {
 				localTS := c.readTimestamps[ch.ID]
 				if ch.LatestTS != "" && (localTS == "" || ch.LatestTS > localTS) {
 					isUnread = true
-				} else if ch.UnreadCount > 0 && localTS == "" {
+				} else if ch.UnreadCount > 0 {
 					isUnread = true
 				}
 			}
@@ -169,11 +169,10 @@ func (c *ChannelList) applyFilter() {
 			localTS := c.readTimestamps[ch.ID]
 			if ch.LatestTS != "" && (localTS == "" || ch.LatestTS > localTS) {
 				isUnread = true
-			} else if ch.UnreadCount > 0 && localTS == "" {
+			} else if ch.UnreadCount > 0 {
 				isUnread = true
 			}
 		}
-
 		if isPinned {
 			if isUnread {
 				pinnedUnread = append(pinnedUnread, ch)
@@ -209,7 +208,7 @@ func (c *ChannelList) applyFilter() {
 			localTS := c.readTimestamps[ch.ID]
 			if ch.LatestTS != "" && (localTS == "" || ch.LatestTS > localTS) {
 				isUnread = true
-			} else if ch.UnreadCount > 0 && localTS == "" {
+			} else if ch.UnreadCount > 0 {
 				isUnread = true
 			}
 		}
@@ -261,4 +260,8 @@ func (c *ChannelList) FilterState() list.FilterState {
 
 func (c *ChannelList) ResetFilter() {
 	c.list.ResetFilter()
+}
+
+func (c *ChannelList) InInsertMode() bool {
+	return c.list.FilterState() == list.Filtering
 }

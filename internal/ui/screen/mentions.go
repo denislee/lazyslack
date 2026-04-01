@@ -46,14 +46,22 @@ type mentionsErrorMsg struct {
 	err error
 }
 
+func (s *MentionsScreen) ChannelID() string    { return "" }
+func (s *MentionsScreen) InInsertMode() bool { return false }
+
 func (s *MentionsScreen) Init() tea.Cmd {
-	return func() tea.Msg {
+	var cmds []tea.Cmd
+	
+	// Fetch mentions
+	cmds = append(cmds, func() tea.Msg {
 		results, err := s.client.Search("to:me")
 		if err != nil {
 			return mentionsErrorMsg{err: err}
 		}
 		return mentionsDataMsg{results: results}
-	}
+	})
+
+	return tea.Batch(cmds...)
 }
 
 func (s *MentionsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
@@ -64,9 +72,11 @@ func (s *MentionsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 
 	case mentionsDataMsg:
 		slog.Info("mentions data received", "count", len(msg.results))
-		s.results = deduplicateMentions(msg.results)
-		s.loading = false
-		s.clampCursor()
+		s.SetMentions(msg.results)
+		return s, nil
+
+	case MentionsRefreshMsg: // From App poll
+		s.SetMentions(msg.Results)
 		return s, nil
 
 	case mentionsErrorMsg:
@@ -127,16 +137,16 @@ func (s *MentionsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 				return s, func() tea.Msg {
 					return OpenChannelMsg{Channel: ch}
 				}
-			} else {
-				idx := s.cursor - len(s.pinnedChannels)
-				if idx < len(s.results) {
-					r := s.results[idx]
-					return s, func() tea.Msg {
-						return OpenChannelMsg{Channel: slack.Channel{
-							ID:   r.ChannelID,
-							Name: r.ChannelName,
-						}}
-					}
+			}
+
+			idx := s.cursor - len(s.pinnedChannels)
+			if idx < len(s.results) {
+				r := s.results[idx]
+				return s, func() tea.Msg {
+					return OpenChannelMsg{Channel: slack.Channel{
+						ID:   r.ChannelID,
+						Name: r.ChannelName,
+					}}
 				}
 			}
 			return s, nil
@@ -176,15 +186,11 @@ func (s *MentionsScreen) View() string {
 			}
 			
 			badge := ""
-			isUnread := false
+			localTS := ""
 			if s.readTimestamps != nil {
-				localTS := s.readTimestamps[ch.ID]
-				if ch.LatestTS != "" && (localTS == "" || ch.LatestTS > localTS) {
-					isUnread = true
-				} else if ch.UnreadCount > 0 && localTS == "" {
-					isUnread = true
-				}
+				localTS = s.readTimestamps[ch.ID]
 			}
+			isUnread := ch.LatestTS != "" && (localTS == "" || ch.LatestTS > localTS)
 
 			if isUnread && ch.UnreadCount > 0 {
 				badge = fmt.Sprintf(" %d", ch.UnreadCount)
@@ -253,7 +259,7 @@ func (s *MentionsScreen) View() string {
 	visible := max(availHeight/itemHeight, 1)
 
 	mentionStartCursor := len(s.pinnedChannels)
-	
+
 	relativeMentionCursor := s.cursor - mentionStartCursor
 	if relativeMentionCursor < 0 {
 		relativeMentionCursor = 0

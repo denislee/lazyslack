@@ -254,3 +254,5 @@ func (s *ActivityScreen) ShortHelp() []key.Binding {
 		key.NewBinding(key.WithKeys("escape"), key.WithHelp("esc", "back")),
 	}
 }
+
+func (s *ActivityScreen) InInsertMode() bool { return false }

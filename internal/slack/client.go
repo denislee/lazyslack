@@ -173,12 +173,38 @@ func (c *Client) GetChannels(types []string, priorityIDs []string) ([]Channel, e
 	}
 	slog.Info("GetChannels done", "total", len(allChannels), "with_unread", unreadCount)
 
-	c.cache.SetChannels(allChannels)
+	s.cache.SetChannels(allChannels)
 	_ = c.cache.SaveChannelsToDisk(allChannels) // Best-effort caching
 	return allChannels, nil
-}
+	}
 
-// enrichWithUnreadCounts calls conversations.info for each channel to get
+	func (c *Client) GetUnreadCounts(ids []string) ([]Channel, error) {
+	channels := make([]Channel, 0, len(ids))
+	for _, id := range ids {
+		ch := c.cache.GetChannel(id)
+		if ch != nil {
+			channels = append(channels, *ch)
+		} else {
+			// If not in cache, create a skeleton channel
+			channels = append(channels, Channel{ID: id})
+		}
+	}
+
+	c.enrichWithUnreadCounts(channels, ids)
+
+	// Update cache with enriched data
+	for _, ch := range channels {
+		if cached := c.cache.GetChannel(ch.ID); cached != nil {
+			cached.UnreadCount = ch.UnreadCount
+			cached.LastReadTS = ch.LastReadTS
+			cached.LatestTS = ch.LatestTS
+		}
+	}
+
+	return channels, nil
+	}
+
+	// enrichWithUnreadCounts calls conversations.info for each channel to get
 // reliable unread counts. Uses concurrent workers with a semaphore.
 // The slack-go library handles rate-limit retries automatically.
 func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string) {

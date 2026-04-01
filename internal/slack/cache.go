@@ -106,13 +106,14 @@ func (c *Cache) SetChannels(channels []Channel) {
 	defer c.mu.Unlock()
 	for i := range channels {
 		id := channels[i].ID
+		newCh := channels[i]
 		if existing, ok := c.channels[id]; ok {
 			// Keep the newest timestamp we've seen
-			if existing.LatestTS > channels[i].LatestTS {
-				channels[i].LatestTS = existing.LatestTS
+			if existing.LatestTS > newCh.LatestTS {
+				newCh.LatestTS = existing.LatestTS
 			}
 		}
-		c.channels[id] = &channels[i]
+		c.channels[id] = &newCh
 	}
 }
 

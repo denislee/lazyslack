@@ -40,6 +40,10 @@ func NewChannelsScreen(client *slack.Client, cfg ChannelsConfig) *ChannelsScreen
 	}
 }
 
+func (s *ChannelsScreen) InInsertMode() bool {
+	return s.channelList.InInsertMode()
+}
+
 func (s *ChannelsScreen) Init() tea.Cmd {
 	var cmds []tea.Cmd
 

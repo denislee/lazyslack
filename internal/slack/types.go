@@ -55,6 +55,16 @@ type UserGroup struct {
 	Name   string
 }
 
+type Thread struct {
+	ID            string // Unique key: channelID:threadTS
+	ChannelID     string
+	ChannelName   string
+	ThreadTS      string
+	Message       Message // Parent message
+	LastReplyTS   string
+	UnreadReplies int
+}
+
 type SearchResult struct {
 	ChannelID   string
 	ChannelName string

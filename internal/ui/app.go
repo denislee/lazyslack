@@ -173,15 +173,10 @@ func (a *App) isScreenInInsertMode() bool {
 	if a.sidebarVisible && a.sidebarFocus == focusSidebar && len(a.stack) > 1 {
 		target = a.stack[0]
 	}
-	switch s := target.(type) {
-	case *screen.ChatScreen:
-		return s.InInsertMode()
-	case *screen.ThreadScreen:
-		return s.InInsertMode()
-	case *screen.SearchScreen:
-		return true // search always has text input active
+	if target == nil {
+		return false
 	}
-	return false
+	return target.InInsertMode()
 }
 
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -192,6 +187,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		a.resizeScreens()
+		if a.quickSwitcher != nil {
+			a.quickSwitcher.SetSize(msg.Width, msg.Height)
+		}
 		return a, nil
 
 	case tea.KeyPressMsg:
@@ -443,17 +441,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Only mark as read if the chat screen is the active (top) screen
-		if chatScreen != nil && a.activeScreen() == chatScreen && len(msg.messages) > 0 {
-			latestTS := msg.messages[len(msg.messages)-1].Timestamp
-			slog.Debug("new messages arrived", "channel", msg.channelID, "latest", latestTS)
-
-			markCmd := func() tea.Msg {
-				_ = a.client.MarkChannel(msg.channelID, latestTS)
-				return nil
-			}
-			return a, markCmd
-		}
 		return a, nil
 
 	case threadPollTickMsg:
@@ -542,16 +529,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				slog.Error("mentions poll fetch failed", "error", err)
 				return pollErrorMsg{err: err, source: "mentions"}
 			}
-			return mentionsRefreshMsg{results: results}
+			return screen.MentionsRefreshMsg{Results: results}
 		}
 		nextPoll := a.startMentionsPolling()
 		return a, tea.Batch(fetchCmd, nextPoll)
 
-	case mentionsRefreshMsg:
-		slog.Info("mentions refreshed", "count", len(msg.results))
+	case screen.MentionsRefreshMsg:
+		slog.Info("mentions refreshed", "count", len(msg.Results))
 		if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
 			ms.SetReadTimestamps(a.readTimestamps)
-			ms.SetMentions(msg.results)
+			ms.SetMentions(msg.Results)
 			ms.SetLastPoll(time.Now())
 		}
 		return a, nil
@@ -575,26 +562,39 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			// Remember selection before update
-			var prevChannelID string
+			var prevID string
 			if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
-				prevChannelID = ms.SelectedChannelID()
+				if ch := ms.SelectedChannel(); ch != nil {
+					prevID = ch.ID
+				} else if r := ms.SelectedResult(); r != nil {
+					prevID = r.ChannelID + ":" + r.Message.Timestamp
+				}
 			}
 
 			newScreen, cmd := a.stack[0].Update(msg)
 			a.stack[0] = newScreen
 
-			// Auto-load channel when cursor moves
+			// Auto-load selection when cursor moves
 			if ms, ok := a.stack[0].(*screen.MentionsScreen); ok {
-				if newID := ms.SelectedChannelID(); newID != "" && newID != prevChannelID {
+				var currID string
+				if ch := ms.SelectedChannel(); ch != nil {
+					currID = ch.ID
+				} else if r := ms.SelectedResult(); r != nil {
+					currID = r.ChannelID + ":" + r.Message.Timestamp
+				}
+
+				if currID != "" && currID != prevID {
 					a.stack = a.stack[:1]
-					
-					// It could be a pinned channel or a mention result
-					var name string
+
+					// Pinned channel or mention result (both open ChatScreen)
+					var channelID, name string
 					isIM := false
 					if ch := ms.SelectedChannel(); ch != nil {
+						channelID = ch.ID
 						name = ch.Name
 						isIM = ch.IsIM
 					} else if r := ms.SelectedResult(); r != nil {
+						channelID = r.ChannelID
 						name = r.ChannelName
 						isIM = r.IsIM
 					}
@@ -603,15 +603,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if isIM {
 						prefix = "@"
 					}
-					chatScreen := screen.NewChatScreen(a.client, a.formatter, newID, prefix+name, a.readTimestamps[newID])
+					chatScreen := screen.NewChatScreen(a.client, a.formatter, channelID, prefix+name, a.readTimestamps[channelID])
 					initCmd := a.pushScreen(chatScreen)
-					pollCmd := a.startChannelPolling(newID)
+					pollCmd := a.startChannelPolling(channelID)
 					return a, tea.Batch(cmd, initCmd, pollCmd)
 				}
 			}
 
 			return a, cmd
 		}
+	}
+
+	// Route non-key messages to quick switcher (e.g., async search results)
+	if a.quickSwitcher != nil {
+		var cmd tea.Cmd
+		a.quickSwitcher, cmd = a.quickSwitcher.Update(msg)
+		return a, cmd
 	}
 
 	// Delegate to active screen
@@ -701,10 +708,6 @@ type channelListRefreshMsg struct {
 }
 
 type mentionsPollTickMsg struct{}
-
-type mentionsRefreshMsg struct {
-	results []slack.SearchResult
-}
 
 func (a *App) startChannelListPolling() tea.Cmd {
 	return tea.Tick(a.config.Polling.ChannelList, func(t time.Time) tea.Msg {
