@@ -43,12 +43,19 @@ func (p *UserProfilePanel) SetUser(user *slack.User) {
 	}
 	p.fields = append(p.fields, profileField{label: "Name", value: displayName})
 	p.fields = append(p.fields, profileField{label: "Handle", value: "@" + user.Name})
+
+	if user.Title != "" {
+		p.fields = append(p.fields, profileField{label: "Title", value: user.Title})
+	}
+	if user.StatusText != "" || user.StatusEmoji != "" {
+		p.fields = append(p.fields, profileField{label: "Status", value: strings.TrimSpace(user.StatusEmoji + " " + user.StatusText)})
+	}
 	
 	emailVal := user.Email
 	if emailVal == "" {
-		emailVal = "MISSING_FROM_API"
+		emailVal = "Not provided"
 	}
-	p.fields = append(p.fields, profileField{label: "EMAIL_DEBUG", value: emailVal})
+	p.fields = append(p.fields, profileField{label: "Email", value: emailVal})
 
 	if user.Phone != "" {
 		p.fields = append(p.fields, profileField{label: "Phone", value: user.Phone})
