@@ -44,6 +44,7 @@ func (f *Formatter) Format(text string) string {
 	})
 
 	// Apply styles to non-code text
+	text = f.resolveEnvironments(text)
 	text = f.resolveBold(text)
 	text = f.resolveItalic(text)
 	text = f.resolveStrike(text)
@@ -184,6 +185,7 @@ var (
 	reStrike         = regexp.MustCompile(`(^|[\s(\[])~([^\s~](?:.*?[^\s~])?)~`)
 	reInlineCode     = regexp.MustCompile("`([^`]+)`")
 	reCodeBlock      = regexp.MustCompile("(?s)```(.+?)```")
+	reEnvironments   = regexp.MustCompile(`(?i)staging|production`)
 )
 
 func (f *Formatter) resolveUserMentions(text string) string {
@@ -258,6 +260,41 @@ func (f *Formatter) resolveItalic(text string) string {
 
 func (f *Formatter) resolveStrike(text string) string {
 	return reStrike.ReplaceAllString(text, "$1\x1b[9m$2\x1b[29m")
+}
+
+func (f *Formatter) resolveEnvironments(text string) string {
+	indices := reEnvironments.FindAllStringIndex(text, -1)
+	if len(indices) == 0 {
+		return text
+	}
+
+	var sb strings.Builder
+	last := 0
+	for _, idx := range indices {
+		start, end := idx[0], idx[1]
+		sb.WriteString(text[last:start])
+
+		isStart := start == 0 || !isAlphanumeric(text[start-1])
+		isEnd := end == len(text) || !isAlphanumeric(text[end])
+
+		word := text[start:end]
+		if isStart && isEnd {
+			color := "81" // light blue for staging
+			if strings.ToLower(word) == "production" {
+				color = "166" // dark orange
+			}
+			sb.WriteString(fmt.Sprintf("\x1b[38;5;%sm%s\x1b[39m", color, word))
+		} else {
+			sb.WriteString(word)
+		}
+		last = end
+	}
+	sb.WriteString(text[last:])
+	return sb.String()
+}
+
+func isAlphanumeric(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 // ExtractURLs returns all URLs found in Slack mrkdwn text.
