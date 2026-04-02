@@ -254,25 +254,27 @@ func (qs *QuickSwitcher) View() string {
 	var b strings.Builder
 
 	// Render tabs
-	tabStyle := lipgloss.NewStyle().
-		Padding(0, 1).
-		Foreground(lipgloss.Color("240"))
 	activeTabStyle := lipgloss.NewStyle().
-		Padding(0, 1).
+		Padding(0, 2).
 		Foreground(lipgloss.Color("255")).
-		Bold(true).
-		Underline(true)
+		Background(lipgloss.Color("33")).
+		Bold(true)
+	inactiveTabStyle := lipgloss.NewStyle().
+		Padding(0, 2).
+		Foreground(lipgloss.Color("250")).
+		Background(lipgloss.Color("238"))
 
-	tabs := []string{"Channel + User", "Messages"}
+	tabs := []string{"Channels", "Messages"}
 	var renderedTabs []string
 	for i, t := range tabs {
 		if quickSwitchTab(i) == qs.tab {
 			renderedTabs = append(renderedTabs, activeTabStyle.Render(t))
 		} else {
-			renderedTabs = append(renderedTabs, tabStyle.Render(t))
+			renderedTabs = append(renderedTabs, inactiveTabStyle.Render(t))
 		}
 	}
-	b.WriteString("  " + strings.Join(renderedTabs, "  ") + "\n\n")
+	tabHint := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("  tab ⇥")
+	b.WriteString("  " + strings.Join(renderedTabs, " ") + tabHint + "\n\n")
 
 	b.WriteString("  " + qs.input.View() + "\n")
 

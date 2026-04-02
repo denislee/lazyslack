@@ -406,6 +406,7 @@ func (c *Client) ResolveUser(userID string) (*User, error) {
 	user := &User{
 		ID:          info.ID,
 		Name:        info.Name,
+		RealName:    info.RealName,
 		DisplayName: info.Profile.DisplayName,
 		IsBot:       info.IsBot,
 		Presence:    presence,
@@ -418,6 +419,9 @@ func (c *Client) ResolveUser(userID string) (*User, error) {
 	}
 	if user.DisplayName == "" {
 		user.DisplayName = info.RealName
+	}
+	if user.RealName == "" {
+		user.RealName = user.DisplayName
 	}
 
 	// Enrich with profile data (email, phone) from users.profile.get

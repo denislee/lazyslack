@@ -37,11 +37,14 @@ func (p *UserProfilePanel) SetUser(user *slack.User) {
 		return
 	}
 
-	displayName := user.DisplayName
-	if displayName == "" {
-		displayName = user.Name
+	name := user.RealName
+	if name == "" {
+		name = user.DisplayName
 	}
-	p.fields = append(p.fields, profileField{label: "Name", value: displayName})
+	if name == "" {
+		name = user.Name
+	}
+	p.fields = append(p.fields, profileField{label: "Name", value: name})
 	p.fields = append(p.fields, profileField{label: "Handle", value: "@" + user.Name})
 
 	if user.Title != "" {
@@ -97,7 +100,7 @@ func (p UserProfilePanel) View() string {
 		return ""
 	}
 
-	contentWidth := w - 4 // padding + border
+	contentWidth := w - 3 // border-left + 1 padding left + 1 padding right
 
 	// Presence indicator header
 	presenceIcon := "○"
@@ -124,36 +127,39 @@ func (p UserProfilePanel) View() string {
 		Foreground(lipgloss.Color("245")).
 		Width(contentWidth)
 
+	valueWidth := contentWidth - 2
 	valueStyle := lipgloss.NewStyle().
-		Width(contentWidth)
+		Width(valueWidth)
 
 	selectedValueStyle := valueStyle.
 		Bold(true).
 		Foreground(lipgloss.Color("255"))
 
 	for i, f := range p.fields {
+		if i > 0 {
+			rows = append(rows, "")
+		}
 		rows = append(rows, labelStyle.Render(f.label))
 		if i == p.focusedIndex {
 			indicator := lipgloss.NewStyle().
 				Foreground(lipgloss.Color("33")).
 				Render("▸ ")
-			rows = append(rows, indicator+selectedValueStyle.Render(truncate(f.value, contentWidth-2)))
+			rows = append(rows, indicator+selectedValueStyle.Render(truncate(f.value, valueWidth)))
 		} else {
-			rows = append(rows, "  "+valueStyle.Render(truncate(f.value, contentWidth-2)))
+			rows = append(rows, "  "+valueStyle.Render(truncate(f.value, valueWidth)))
 		}
 	}
 
 	content := strings.Join(rows, "\n")
 
 	panel := lipgloss.NewStyle().
-		Width(w).
+		Width(w - 1).
 		Height(p.height).
 		BorderLeft(true).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color("33")).
 		PaddingLeft(1).
 		PaddingRight(1).
-		PaddingTop(1).
 		Render(content)
 
 	return panel

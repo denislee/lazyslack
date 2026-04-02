@@ -36,6 +36,7 @@ type Reaction struct {
 type User struct {
 	ID          string
 	Name        string
+	RealName    string
 	DisplayName string
 	IsBot       bool
 	Presence    string // "active" or "away"

@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/user/lazyslack/internal/slack"
 	"github.com/user/lazyslack/internal/ui/component"
@@ -361,7 +362,7 @@ func (s *MentionsScreen) renderMentions() string {
 
 		ageStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 		ageStr := ageStyle.Render(age)
-		header := chanStyle.Render(truncate(channel, contentWidth-len(age)-1)) + " " + ageStr
+		header := chanStyle.Render(truncate(channel, contentWidth-runewidth.StringWidth(age)-1)) + " " + ageStr
 
 		// Message preview on second line
 		preview := s.formatter.Format(r.Message.Text)
@@ -518,11 +519,5 @@ func truncate(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
-	if len(s) <= maxLen {
-		return s
-	}
-	if maxLen <= 1 {
-		return s[:maxLen]
-	}
-	return s[:maxLen-1] + "…"
+	return runewidth.Truncate(s, maxLen, "…")
 }

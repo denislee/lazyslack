@@ -19,6 +19,7 @@ type ThreadScreen struct {
 	composer       component.Composer
 	statusBar      component.StatusBar
 	profilePanel   component.UserProfilePanel
+	reactionPicker *component.ReactionPicker
 	profileVisible bool
 	client         *slack.Client
 	formatter      *slack.Formatter
@@ -37,6 +38,7 @@ func NewThreadScreen(client *slack.Client, formatter *slack.Formatter, channelID
 		messageList:   component.NewMessageList(formatter, 80, 15),
 		composer:      component.NewComposer(80),
 		statusBar:     component.NewStatusBar(),
+		profilePanel:  component.NewUserProfilePanel(),
 		client:        client,
 		formatter:     formatter,
 		channelID:     channelID,
@@ -53,7 +55,9 @@ func NewThreadScreen(client *slack.Client, formatter *slack.Formatter, channelID
 
 func (s *ThreadScreen) ChannelID() string  { return s.channelID }
 func (s *ThreadScreen) ThreadTS() string   { return s.threadTS }
-func (s *ThreadScreen) InInsertMode() bool { return s.focus == focusComposer }
+func (s *ThreadScreen) InInsertMode() bool {
+	return s.focus == focusComposer || s.reactionPicker != nil
+}
 
 func (s *ThreadScreen) SetMessages(msgs []slack.Message) {
 	s.messageList.SetMessages(msgs)
@@ -113,7 +117,36 @@ func (s *ThreadScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		s.statusBar.SetError(msg.err.Error())
 		return s, nil
 
+	case component.ReactionPickedMsg:
+		s.reactionPicker = nil
+		focused := s.messageList.FocusedMessage()
+		if focused != nil {
+			return s, func() tea.Msg {
+				err := s.client.AddReaction(s.channelID, focused.Timestamp, msg.Emoji)
+				if err != nil {
+					return threadErrorMsg{err: err}
+				}
+				// Refresh thread replies to show the reaction
+				msgs, err := s.client.GetThreadReplies(s.channelID, s.threadTS)
+				if err != nil {
+					return threadErrorMsg{err: err}
+				}
+				return threadMessagesMsg{messages: msgs}
+			}
+		}
+		return s, nil
+
 	case tea.KeyPressMsg:
+		// Handle reaction picker if open
+		if s.reactionPicker != nil {
+			if key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+["))) {
+				s.reactionPicker = nil
+				return s, nil
+			}
+			cmd := s.reactionPicker.Update(msg)
+			return s, cmd
+		}
+
 		if s.focus == focusComposer {
 			return s.handleComposerKey(msg)
 		}
@@ -269,6 +302,49 @@ func (s *ThreadScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		}
 		return s, nil
 
+	case key.Matches(msg, key.NewBinding(key.WithKeys("+", "r"))):
+		if focused := s.messageList.FocusedMessage(); focused != nil {
+			var existing []component.ExistingReaction
+			for _, r := range focused.Reactions {
+				existing = append(existing, component.ExistingReaction{Name: r.Name, HasMe: r.HasMe})
+			}
+			picker := component.NewReactionPicker(existing)
+			s.reactionPicker = &picker
+			return s, picker.Init()
+		}
+		return s, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("R"))):
+		focused := s.messageList.FocusedMessage()
+		if focused == nil || len(focused.Reactions) == 0 {
+			return s, nil
+		}
+		allMine := true
+		for _, r := range focused.Reactions {
+			if !r.HasMe {
+				allMine = false
+				break
+			}
+		}
+		reactions := focused.Reactions
+		ts := focused.Timestamp
+		chID := s.channelID
+		threadTS := s.threadTS
+		return s, func() tea.Msg {
+			for _, r := range reactions {
+				if allMine {
+					_ = s.client.RemoveReaction(chID, ts, r.Name)
+				} else if !r.HasMe {
+					_ = s.client.AddReaction(chID, ts, r.Name)
+				}
+			}
+			msgs, err := s.client.GetThreadReplies(chID, threadTS)
+			if err != nil {
+				return threadErrorMsg{err: err}
+			}
+			return threadMessagesMsg{messages: msgs}
+		}
+
 	case key.Matches(msg, key.NewBinding(key.WithKeys("i"))):
 		s.focus = focusComposer
 		return s, s.composer.Focus()
@@ -332,8 +408,21 @@ func (s *ThreadScreen) View() string {
 			Render(" -- INSERT --")
 	}
 
+	messageView := s.messageList.View()
+	if s.reactionPicker != nil {
+		composerHeight := 3
+		if s.focus == focusComposer {
+			composerHeight = 5
+		}
+		msgHeight := s.height - 2 - composerHeight - 1 // header, composer, status
+		if msgHeight < 3 {
+			msgHeight = 3
+		}
+		messageView = lipgloss.Place(mw, msgHeight, lipgloss.Center, lipgloss.Center, s.reactionPicker.View())
+	}
+
 	main := headerBar + "\n" +
-		s.messageList.View() + "\n" +
+		messageView + "\n" +
 		s.composer.View() + modeIndicator + "\n" +
 		s.statusBar.View()
 
@@ -388,6 +477,8 @@ func (s *ThreadScreen) ShortHelp() []key.Binding {
 	return []key.Binding{
 		key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "reply")),
 		key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "profile")),
+		key.NewBinding(key.WithKeys("r"), key.WithHelp("r/+", "react")),
+		key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "react all")),
 		key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yank")),
 		key.NewBinding(key.WithKeys("j/k"), key.WithHelp("j/k", "navigate")),
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open link")),

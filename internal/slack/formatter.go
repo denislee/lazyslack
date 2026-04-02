@@ -45,6 +45,7 @@ func (f *Formatter) Format(text string) string {
 
 	// Apply styles to non-code text
 	text = f.resolveEnvironments(text)
+	text = f.resolveAlertStatus(text)
 	text = f.resolveBold(text)
 	text = f.resolveItalic(text)
 	text = f.resolveStrike(text)
@@ -186,6 +187,7 @@ var (
 	reInlineCode     = regexp.MustCompile("`([^`]+)`")
 	reCodeBlock      = regexp.MustCompile("(?s)```(.+?)```")
 	reEnvironments   = regexp.MustCompile(`(?i)staging|production`)
+	reAlertStatus    = regexp.MustCompile(`RESOLVED|FIRING`)
 )
 
 func (f *Formatter) resolveUserMentions(text string) string {
@@ -293,6 +295,38 @@ func (f *Formatter) resolveEnvironments(text string) string {
 	return sb.String()
 }
 
+func (f *Formatter) resolveAlertStatus(text string) string {
+	indices := reAlertStatus.FindAllStringIndex(text, -1)
+	if len(indices) == 0 {
+		return text
+	}
+
+	var sb strings.Builder
+	last := 0
+	for _, idx := range indices {
+		start, end := idx[0], idx[1]
+		sb.WriteString(text[last:start])
+
+		isStart := start == 0 || !isAlphanumeric(text[start-1])
+		isEnd := end == len(text) || !isAlphanumeric(text[end])
+
+		word := text[start:end]
+		if isStart && isEnd {
+			upper := strings.ToUpper(word)
+			if upper == "RESOLVED" {
+				sb.WriteString("\x1b[32m● " + word + "\x1b[39m") // green dot + text
+			} else {
+				sb.WriteString("\x1b[31m● " + word + "\x1b[39m") // red dot + text
+			}
+		} else {
+			sb.WriteString(word)
+		}
+		last = end
+	}
+	sb.WriteString(text[last:])
+	return sb.String()
+}
+
 func isAlphanumeric(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
@@ -332,7 +366,7 @@ func defaultEmojiMap() map[string]string {
 		"+1":                 "\U0001F44D",
 		"thumbsdown":         "\U0001F44E",
 		"-1":                 "\U0001F44E",
-		"heart":              "\u2764\uFE0F",
+		"heart":              "\u2764",
 		"smile":              "\U0001F604",
 		"laughing":           "\U0001F606",
 		"grinning":           "\U0001F600",
@@ -351,28 +385,28 @@ func defaultEmojiMap() map[string]string {
 		"clap":               "\U0001F44F",
 		"raised_hands":       "\U0001F64C",
 		"ok_hand":            "\U0001F44C",
-		"point_up":           "\u261D\uFE0F",
+		"point_up":           "\u261D",
 		"point_down":         "\U0001F447",
 		"point_left":         "\U0001F448",
 		"point_right":        "\U0001F449",
 		"muscle":             "\U0001F4AA",
 		"white_check_mark":   "\u2705",
-		"heavy_check_mark":   "\u2714\uFE0F",
+		"heavy_check_mark":   "\u2714",
 		"x":                  "\u274C",
-		"warning":            "\u26A0\uFE0F",
+		"warning":            "\u26A0",
 		"question":           "\u2753",
 		"exclamation":        "\u2757",
 		"bulb":               "\U0001F4A1",
 		"memo":               "\U0001F4DD",
 		"wrench":             "\U0001F527",
-		"gear":               "\u2699\uFE0F",
+		"gear":               "\u2699",
 		"bug":                "\U0001F41B",
 		"star":               "\u2B50",
 		"sparkles":           "\u2728",
 		"zap":               "\u26A1",
-		"sunny":              "\u2600\uFE0F",
-		"cloud":              "\u2601\uFE0F",
-		"umbrella":           "\u2602\uFE0F",
+		"sunny":              "\u2600",
+		"cloud":              "\u2601",
+		"umbrella":           "\u2602",
 		"coffee":             "\u2615",
 		"beer":               "\U0001F37A",
 		"pizza":              "\U0001F355",
@@ -413,11 +447,11 @@ func defaultEmojiMap() map[string]string {
 		"key":                "\U0001F511",
 		"link":               "\U0001F517",
 		"paperclip":          "\U0001F4CE",
-		"scissors":           "\u2702\uFE0F",
+		"scissors":           "\u2702",
 		"hammer":             "\U0001F528",
-		"hammer_and_wrench":  "\U0001F6E0\uFE0F",
+		"hammer_and_wrench":  "\U0001F6E0",
 		"hourglass":          "\u231B",
-		"stopwatch":          "\u23F1\uFE0F",
+		"stopwatch":          "\u23F1",
 		"alarm_clock":        "\u23F0",
 		"calendar":           "\U0001F4C5",
 		"pushpin":            "\U0001F4CC",
@@ -427,13 +461,13 @@ func defaultEmojiMap() map[string]string {
 		"no_bell":            "\U0001F515",
 		"speech_balloon":     "\U0001F4AC",
 		"thought_balloon":    "\U0001F4AD",
-		"arrow_up":           "\u2B06\uFE0F",
-		"arrow_down":         "\u2B07\uFE0F",
-		"arrow_left":         "\u2B05\uFE0F",
-		"arrow_right":        "\u27A1\uFE0F",
+		"arrow_up":           "\u2B06",
+		"arrow_down":         "\u2B07",
+		"arrow_left":         "\u2B05",
+		"arrow_right":        "\u27A1",
 		"heavy_plus_sign":    "\u2795",
 		"heavy_minus_sign":   "\u2796",
-		"wavy_dash":          "\u3030\uFE0F",
+		"wavy_dash":          "\u3030",
 		"slightly_smiling_face": "\U0001F642",
 		"upside_down_face":   "\U0001F643",
 		"stuck_out_tongue":   "\U0001F61B",

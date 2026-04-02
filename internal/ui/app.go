@@ -637,6 +637,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if active != nil {
 		newScreen, cmd := active.Update(msg)
 		a.stack[len(a.stack)-1] = newScreen
+
+		// Also forward non-key messages to the sidebar screen (stack[0]) when it's
+		// in the background, so its async commands (Init, refresh) still complete
+		// even when another screen is on top.
+		if len(a.stack) > 1 {
+			if _, isKey := msg.(tea.KeyPressMsg); !isKey {
+				newSidebar, sidebarCmd := a.stack[0].Update(msg)
+				a.stack[0] = newSidebar
+				return a, tea.Batch(cmd, sidebarCmd)
+			}
+		}
+
 		return a, cmd
 	}
 

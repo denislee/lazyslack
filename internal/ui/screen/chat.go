@@ -57,7 +57,9 @@ func NewChatScreen(client *slack.Client, formatter *slack.Formatter, channelID, 
 }
 
 func (s *ChatScreen) ChannelID() string    { return s.channelID }
-func (s *ChatScreen) InInsertMode() bool   { return s.focus == focusComposer }
+func (s *ChatScreen) InInsertMode() bool {
+	return s.focus == focusComposer || s.reactionPicker != nil
+}
 
 func (s *ChatScreen) Init() tea.Cmd {
 	var cmds []tea.Cmd
@@ -270,12 +272,46 @@ func (s *ChatScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		return s, nil
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("+", "r"))):
-		if s.messageList.FocusedMessage() != nil {
-			picker := component.NewReactionPicker(s.width, s.height)
+		if focused := s.messageList.FocusedMessage(); focused != nil {
+			var existing []component.ExistingReaction
+			for _, r := range focused.Reactions {
+				existing = append(existing, component.ExistingReaction{Name: r.Name, HasMe: r.HasMe})
+			}
+			picker := component.NewReactionPicker(existing)
 			s.reactionPicker = &picker
 			return s, picker.Init()
 		}
 		return s, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("R"))):
+		focused := s.messageList.FocusedMessage()
+		if focused == nil || len(focused.Reactions) == 0 {
+			return s, nil
+		}
+		allMine := true
+		for _, r := range focused.Reactions {
+			if !r.HasMe {
+				allMine = false
+				break
+			}
+		}
+		reactions := focused.Reactions
+		ts := focused.Timestamp
+		chID := s.channelID
+		return s, func() tea.Msg {
+			for _, r := range reactions {
+				if allMine {
+					_ = s.client.RemoveReaction(chID, ts, r.Name)
+				} else if !r.HasMe {
+					_ = s.client.AddReaction(chID, ts, r.Name)
+				}
+			}
+			msgs, err := s.client.GetMessages(chID, 50, "")
+			if err != nil {
+				return chatErrorMsg{err: err}
+			}
+			return chatMessagesMsg{channelID: chID, messages: msgs}
+		}
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+d", "ctrl+f", "pgdown"))):
 		s.messageList.PageDown()
@@ -343,16 +379,23 @@ func (s *ChatScreen) View() string {
 			Render(" -- INSERT --")
 	}
 
-	base := headerBar + "\n" +
-		s.messageList.View() + "\n" +
-		s.composer.View() + modeIndicator + "\n" +
-		s.statusBar.View()
-
+	messageView := s.messageList.View()
 	if s.reactionPicker != nil {
-		return s.reactionPicker.View()
+		composerHeight := 3
+		if s.focus == focusComposer {
+			composerHeight = 5
+		}
+		msgHeight := s.height - 2 - composerHeight - 1 // header, composer, status
+		if msgHeight < 3 {
+			msgHeight = 3
+		}
+		messageView = lipgloss.Place(s.width, msgHeight, lipgloss.Center, lipgloss.Center, s.reactionPicker.View())
 	}
 
-	return base
+	return headerBar + "\n" +
+		messageView + "\n" +
+		s.composer.View() + modeIndicator + "\n" +
+		s.statusBar.View()
 }
 
 func (s *ChatScreen) SetSize(w, h int) {
@@ -395,6 +438,7 @@ func (s *ChatScreen) ShortHelp() []key.Binding {
 		key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "reply")),
 		key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yank")),
 		key.NewBinding(key.WithKeys("r"), key.WithHelp("r/+", "react")),
+		key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "react all")),
 		key.NewBinding(key.WithKeys("escape", "ctrl+["), key.WithHelp("esc", "back")),
 	}
 }
