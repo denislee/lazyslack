@@ -1,6 +1,7 @@
 package component
 
 import (
+	"sort"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -199,30 +200,102 @@ func (qs *QuickSwitcher) Update(msg tea.Msg) (*QuickSwitcher, tea.Cmd) {
 	return qs, cmd
 }
 
+// fuzzyScore returns a match score for query against target.
+// Returns -1 if no match. Lower score = better match.
+// Exact substring matches always rank above fuzzy matches.
+func fuzzyScore(query, target string) int {
+	if query == "" {
+		return 0
+	}
+
+	queryLower := strings.ToLower(query)
+	targetLower := strings.ToLower(target)
+
+	// Exact substring match gets best score (position of match)
+	if idx := strings.Index(targetLower, queryLower); idx >= 0 {
+		return idx
+	}
+
+	// Fuzzy: all query runes must appear in target in order
+	queryRunes := []rune(queryLower)
+	targetRunes := []rune(targetLower)
+
+	qi := 0
+	score := len(targetRunes) // base penalty so fuzzy always ranks below substring
+	lastMatch := -1
+
+	for ti := 0; ti < len(targetRunes) && qi < len(queryRunes); ti++ {
+		if targetRunes[ti] == queryRunes[qi] {
+			if lastMatch >= 0 {
+				score += ti - lastMatch - 1 // gap penalty
+			} else {
+				score += ti // penalize late first match
+			}
+			lastMatch = ti
+			qi++
+		}
+	}
+
+	if qi < len(queryRunes) {
+		return -1 // not all chars matched
+	}
+
+	return score
+}
+
 func (qs *QuickSwitcher) filterResults() {
-	query := strings.ToLower(strings.TrimSpace(qs.input.Value()))
+	query := strings.TrimSpace(qs.input.Value())
 	qs.results = qs.results[:0]
 
 	if qs.tab == tabChannels {
-		// Channels
-		for i := range qs.channels {
-			ch := &qs.channels[i]
-			if ch.IsIM || ch.IsMPIM {
-				continue
-			}
-			if query == "" || strings.Contains(strings.ToLower(ch.Name), query) {
+		if query == "" {
+			// No query: show all, grouped by kind
+			for i := range qs.channels {
+				ch := &qs.channels[i]
+				if ch.IsIM || ch.IsMPIM {
+					continue
+				}
 				qs.results = append(qs.results, resultEntry{kind: resultChannel, channel: ch})
 			}
-		}
-
-		// People (IMs)
-		for i := range qs.channels {
-			ch := &qs.channels[i]
-			if !ch.IsIM {
-				continue
-			}
-			if query == "" || strings.Contains(strings.ToLower(ch.Name), query) {
+			for i := range qs.channels {
+				ch := &qs.channels[i]
+				if !ch.IsIM {
+					continue
+				}
 				qs.results = append(qs.results, resultEntry{kind: resultPerson, channel: ch})
+			}
+		} else {
+			// Fuzzy match and sort by score
+			type scored struct {
+				entry resultEntry
+				score int
+			}
+			var matches []scored
+
+			for i := range qs.channels {
+				ch := &qs.channels[i]
+				if ch.IsIM || ch.IsMPIM {
+					continue
+				}
+				if s := fuzzyScore(query, ch.Name); s >= 0 {
+					matches = append(matches, scored{resultEntry{kind: resultChannel, channel: ch}, s})
+				}
+			}
+			for i := range qs.channels {
+				ch := &qs.channels[i]
+				if !ch.IsIM {
+					continue
+				}
+				if s := fuzzyScore(query, ch.Name); s >= 0 {
+					matches = append(matches, scored{resultEntry{kind: resultPerson, channel: ch}, s})
+				}
+			}
+
+			sort.Slice(matches, func(i, j int) bool {
+				return matches[i].score < matches[j].score
+			})
+			for _, m := range matches {
+				qs.results = append(qs.results, m.entry)
 			}
 		}
 	} else {
@@ -293,13 +366,14 @@ func (qs *QuickSwitcher) View() string {
 	boxW := qs.boxWidth() - 6 // border(2) + padding(2) + indent(2)
 
 	// Track sections for headers
+	query := strings.TrimSpace(qs.input.Value())
 	var lastKind resultKind = -1
 	visible := 0
 	for i := start; i < len(qs.results) && visible < maxVisible; i++ {
 		entry := qs.results[i]
 
-		// Section header (only for channels tab)
-		if qs.tab == tabChannels && entry.kind != lastKind {
+		// Section header (only for channels tab with no query — fuzzy results are sorted by score)
+		if qs.tab == tabChannels && query == "" && entry.kind != lastKind {
 			var header string
 			switch entry.kind {
 			case resultChannel:

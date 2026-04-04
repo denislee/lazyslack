@@ -46,6 +46,7 @@ type User struct {
 	Email       string
 	Phone       string
 	Timezone    string
+	ImageURL    string
 }
 
 type File struct {
@@ -68,6 +69,22 @@ type Thread struct {
 	Message       Message // Parent message
 	LastReplyTS   string
 	UnreadReplies int
+}
+
+// AllURLs returns all openable URLs from a message: text URLs + file URLs.
+func (m *Message) AllURLs() []string {
+	urls := ExtractURLs(m.Text)
+	seen := make(map[string]bool, len(urls))
+	for _, u := range urls {
+		seen[u] = true
+	}
+	for _, f := range m.Files {
+		if f.URL != "" && !seen[f.URL] {
+			urls = append(urls, f.URL)
+			seen[f.URL] = true
+		}
+	}
+	return urls
 }
 
 type SearchResult struct {

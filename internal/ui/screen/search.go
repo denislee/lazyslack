@@ -47,7 +47,9 @@ func NewSearchScreen(client *slack.Client, formatter *slack.Formatter) *SearchSc
 	}
 }
 
-func (s *SearchScreen) InInsertMode() bool { return true }
+func (s *SearchScreen) InInsertMode() bool     { return true }
+func (s *SearchScreen) StatusBarView() string  { return "" }
+func (s *SearchScreen) SetStatusBarWidth(int) {}
 
 func (s *SearchScreen) Init() tea.Cmd {
 	return textinput.Blink

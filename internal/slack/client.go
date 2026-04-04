@@ -247,6 +247,62 @@ func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string
 	wg.Wait()
 }
 
+func (c *Client) GetMessagesAround(channelID string, messageTS string, limit int) ([]Message, error) {
+	half := limit / 2
+	if half < 10 {
+		half = 10
+	}
+
+	// Get messages up to and including the target
+	paramsBefore := &slackapi.GetConversationHistoryParameters{
+		ChannelID: channelID,
+		Latest:    messageTS,
+		Inclusive: true,
+		Limit:     half,
+	}
+	histBefore, err := c.api.GetConversationHistory(paramsBefore)
+	if err != nil {
+		return nil, fmt.Errorf("get history (before): %w", err)
+	}
+
+	// Get messages after the target
+	paramsAfter := &slackapi.GetConversationHistoryParameters{
+		ChannelID: channelID,
+		Oldest:    messageTS,
+		Inclusive: false,
+		Limit:     half,
+	}
+	histAfter, err := c.api.GetConversationHistory(paramsAfter)
+	if err != nil {
+		return nil, fmt.Errorf("get history (after): %w", err)
+	}
+
+	seen := make(map[string]bool)
+	var messages []Message
+	for _, msg := range histBefore.Messages {
+		m := c.convertMessage(msg)
+		if !seen[m.Timestamp] {
+			seen[m.Timestamp] = true
+			messages = append(messages, m)
+		}
+	}
+	for _, msg := range histAfter.Messages {
+		m := c.convertMessage(msg)
+		if !seen[m.Timestamp] {
+			seen[m.Timestamp] = true
+			messages = append(messages, m)
+		}
+	}
+
+	sort.Slice(messages, func(i, j int) bool {
+		return messages[i].Timestamp < messages[j].Timestamp
+	})
+
+	c.cache.SetMessages(channelID, messages)
+	_ = c.cache.SaveMessagesToDisk(channelID, messages)
+	return messages, nil
+}
+
 func (c *Client) GetMessages(channelID string, limit int, oldest string) ([]Message, error) {
 	params := &slackapi.GetConversationHistoryParameters{
 		ChannelID: channelID,
@@ -303,6 +359,18 @@ func (c *Client) SendMessage(channelID, text string) error {
 	)
 	if err != nil {
 		return fmt.Errorf("send message: %w", friendlyError(err))
+	}
+	return nil
+}
+
+func (c *Client) UpdateMessage(channelID, timestamp, text string) error {
+	_, _, _, err := c.api.UpdateMessage(
+		channelID,
+		timestamp,
+		slackapi.MsgOptionText(text, false),
+	)
+	if err != nil {
+		return fmt.Errorf("update message: %w", friendlyError(err))
 	}
 	return nil
 }
@@ -416,6 +484,7 @@ func (c *Client) ResolveUser(userID string) (*User, error) {
 		Email:       info.Profile.Email,
 		Phone:       info.Profile.Phone,
 		Timezone:    info.TZ,
+		ImageURL:    info.Profile.Image192,
 	}
 	if user.DisplayName == "" {
 		user.DisplayName = info.RealName

@@ -13,7 +13,9 @@ type Screen interface {
 	Init() tea.Cmd
 	Update(msg tea.Msg) (Screen, tea.Cmd)
 	View() string
+	StatusBarView() string
 	SetSize(width, height int)
+	SetStatusBarWidth(width int)
 	ShortHelp() []key.Binding
 	InInsertMode() bool
 }

@@ -20,6 +20,8 @@ type ThreadScreen struct {
 	statusBar      component.StatusBar
 	profilePanel   component.UserProfilePanel
 	reactionPicker *component.ReactionPicker
+	linkPicker     *component.LinkPicker
+	pager          *component.Pager
 	profileVisible bool
 	client         *slack.Client
 	formatter      *slack.Formatter
@@ -29,6 +31,7 @@ type ThreadScreen struct {
 	readTimestamp  string
 	parentMsg      slack.Message
 	focus          chatFocus
+	editingTS      string
 	width          int
 	height         int
 }
@@ -56,7 +59,7 @@ func NewThreadScreen(client *slack.Client, formatter *slack.Formatter, channelID
 func (s *ThreadScreen) ChannelID() string  { return s.channelID }
 func (s *ThreadScreen) ThreadTS() string   { return s.threadTS }
 func (s *ThreadScreen) InInsertMode() bool {
-	return s.focus == focusComposer || s.reactionPicker != nil
+	return s.focus == focusComposer || s.reactionPicker != nil || s.linkPicker != nil || s.pager != nil
 }
 
 func (s *ThreadScreen) SetMessages(msgs []slack.Message) {
@@ -117,6 +120,19 @@ func (s *ThreadScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		s.statusBar.SetError(msg.err.Error())
 		return s, nil
 
+	case avatarResultMsg:
+		if msg.userID == s.profilePanel.UserID() {
+			s.profilePanel.SetAvatar(msg.avatar)
+		}
+		return s, nil
+
+	case component.LinkPickedMsg:
+		s.linkPicker = nil
+		if msg.URL != "" {
+			_ = openBrowser(msg.URL)
+		}
+		return s, nil
+
 	case component.ReactionPickedMsg:
 		s.reactionPicker = nil
 		focused := s.messageList.FocusedMessage()
@@ -136,7 +152,28 @@ func (s *ThreadScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		}
 		return s, nil
 
+	case component.PagerCloseMsg:
+		s.pager = nil
+		return s, nil
+
 	case tea.KeyPressMsg:
+		// Handle pager if open
+		if s.pager != nil {
+			p, cmd := s.pager.Update(msg)
+			s.pager = &p
+			return s, cmd
+		}
+
+		// Handle link picker if open
+		if s.linkPicker != nil {
+			if key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+[", "h"))) {
+				s.linkPicker = nil
+				return s, nil
+			}
+			cmd := s.linkPicker.Update(msg)
+			return s, cmd
+		}
+
 		// Handle reaction picker if open
 		if s.reactionPicker != nil {
 			if key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+["))) {
@@ -177,21 +214,30 @@ func (s *ThreadScreen) checkReadStatus() tea.Cmd {
 	return nil
 }
 
-func (s *ThreadScreen) updateProfilePanel() {
+func (s *ThreadScreen) updateProfilePanel() tea.Cmd {
 	if !s.profileVisible {
-		return
+		return nil
 	}
 	focused := s.messageList.FocusedMessage()
 	if focused == nil {
-		return
+		return nil
 	}
 	user, err := s.client.ResolveUser(focused.UserID)
 	if err != nil {
 		slog.Error("thread profile resolve error", "user", focused.UserID, "error", err)
-		return
+		return nil
 	}
 	slog.Debug("thread profile resolved", "name", user.Name, "email", user.Email)
 	s.profilePanel.SetUser(user)
+
+	if user.ImageURL != "" {
+		avatarWidth := s.profilePanelWidth() - 5
+		if avatarWidth > 16 {
+			avatarWidth = 16
+		}
+		return fetchAvatarCmd(user.ID, user.ImageURL, avatarWidth)
+	}
+	return nil
 }
 
 func (s *ThreadScreen) profilePanelWidth() int {
@@ -227,6 +273,14 @@ func (s *ThreadScreen) handleProfileKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		s.profilePanel.MoveUp()
 		return s, nil
 
+	case key.Matches(msg, key.NewBinding(key.WithKeys("enter", "l"))):
+		if s.profilePanel.IsAvatarFocused() {
+			if url := s.profilePanel.AvatarURL(); url != "" {
+				_ = openBrowser(url)
+			}
+		}
+		return s, nil
+
 	case key.Matches(msg, key.NewBinding(key.WithKeys("y"))):
 		val := s.profilePanel.FocusedValue()
 		if val != "" {
@@ -244,6 +298,8 @@ func (s *ThreadScreen) handleProfileKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 }
 
 func (s *ThreadScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
+	s.statusBar.SetStatus("")
+	s.statusBar.SetError("")
 	if s.profileVisible {
 		return s.handleProfileKey(msg)
 	}
@@ -260,8 +316,7 @@ func (s *ThreadScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		}
 		s.profileVisible = true
 		s.recalcSizes()
-		s.updateProfilePanel()
-		return s, nil
+		return s, s.updateProfilePanel()
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("j", "down", "ctrl+n"))):
 		s.messageList.MoveDown()
@@ -283,10 +338,18 @@ func (s *ThreadScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		cmds = append(cmds, s.checkReadStatus())
 	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
 		focused := s.messageList.FocusedMessage()
-		if focused != nil {
-			if urls := slack.ExtractURLs(focused.Text); len(urls) > 0 {
-				_ = openBrowser(urls[0])
-			}
+		if focused == nil {
+			return s, nil
+		}
+		urls := focused.AllURLs()
+		if len(urls) == 1 {
+			_ = openBrowser(urls[0])
+			return s, nil
+		}
+		if len(urls) > 1 {
+			picker := component.NewLinkPicker(focused, s.mainWidth()-10)
+			s.linkPicker = &picker
+			return s, nil
 		}
 		return s, nil
 
@@ -347,7 +410,28 @@ func (s *ThreadScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("i"))):
 		s.focus = focusComposer
+		s.editingTS = ""
 		return s, s.composer.Focus()
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("e"))):
+		focused := s.messageList.FocusedMessage()
+		if focused == nil {
+			return s, nil
+		}
+		if focused.UserID == s.client.GetSelfID() {
+			s.focus = focusComposer
+			s.editingTS = focused.Timestamp
+			s.composer.SetValue(focused.Text)
+			return s, s.composer.Focus()
+		}
+		// View mode for other people's messages
+		msgHeight := s.height - 2 // header only, no composer
+		if msgHeight < 3 {
+			msgHeight = 3
+		}
+		p := component.NewPager(focused.Text, s.mainWidth(), msgHeight)
+		s.pager = &p
+		return s, nil
 	}
 
 	return s, tea.Batch(cmds...)
@@ -357,7 +441,9 @@ func (s *ThreadScreen) handleComposerKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) 
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+["))):
 		s.focus = focusMessages
+		s.editingTS = ""
 		s.composer.Blur()
+		s.composer.Reset()
 		return s, nil
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
@@ -365,9 +451,25 @@ func (s *ThreadScreen) handleComposerKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) 
 		if text == "" {
 			return s, nil
 		}
+		s.composer.SaveToHistory(text)
 		s.composer.Reset()
 		s.focus = focusMessages
 		s.composer.Blur()
+		editingTS := s.editingTS
+		s.editingTS = ""
+		if editingTS != "" {
+			return s, func() tea.Msg {
+				err := s.client.UpdateMessage(s.channelID, editingTS, text)
+				if err != nil {
+					return threadErrorMsg{err: err}
+				}
+				msgs, err := s.client.GetThreadReplies(s.channelID, s.threadTS)
+				if err != nil {
+					return threadErrorMsg{err: err}
+				}
+				return threadMessagesMsg{messages: msgs}
+			}
+		}
 		return s, func() tea.Msg {
 			err := s.client.SendThreadReply(s.channelID, s.threadTS, text)
 			if err != nil {
@@ -403,28 +505,46 @@ func (s *ThreadScreen) View() string {
 
 	modeIndicator := ""
 	if s.focus == focusComposer {
-		modeIndicator = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("42")).
-			Render(" -- INSERT --")
+		if s.editingTS != "" {
+			modeIndicator = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("214")).
+				Render(" -- EDIT --")
+		} else {
+			modeIndicator = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("42")).
+				Render(" -- INSERT --")
+		}
 	}
 
 	messageView := s.messageList.View()
-	if s.reactionPicker != nil {
-		composerHeight := 3
-		if s.focus == focusComposer {
-			composerHeight = 5
+	if s.pager != nil {
+		messageView = s.pager.View()
+	} else if s.linkPicker != nil {
+		msgHeight := s.height - 2
+		if msgHeight < 3 {
+			msgHeight = 3
 		}
-		msgHeight := s.height - 2 - composerHeight - 1 // header, composer, status
+		messageView = lipgloss.Place(mw, msgHeight, lipgloss.Center, lipgloss.Center, s.linkPicker.View())
+	} else if s.reactionPicker != nil {
+		msgHeight := s.height - 2
 		if msgHeight < 3 {
 			msgHeight = 3
 		}
 		messageView = lipgloss.Place(mw, msgHeight, lipgloss.Center, lipgloss.Center, s.reactionPicker.View())
 	}
 
-	main := headerBar + "\n" +
-		messageView + "\n" +
-		s.composer.View() + modeIndicator + "\n" +
-		s.statusBar.View()
+	s.recalcSizes()
+
+	var main string
+	if s.pager != nil {
+		main = headerBar + "\n" + messageView
+	} else if s.focus == focusComposer {
+		main = headerBar + "\n" +
+			messageView + "\n" +
+			s.composer.View() + modeIndicator
+	} else {
+		main = headerBar + "\n" + messageView
+	}
 
 	if !s.profileVisible {
 		return main
@@ -433,27 +553,30 @@ func (s *ThreadScreen) View() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, main, s.profilePanel.View())
 }
 
+func (s *ThreadScreen) StatusBarView() string {
+	return s.statusBar.View()
+}
+
 func (s *ThreadScreen) SetSize(w, h int) {
 	s.width = w
 	s.height = h
 	s.recalcSizes()
 }
 
+func (s *ThreadScreen) SetStatusBarWidth(w int) { s.statusBar.SetWidth(w) }
+
 func (s *ThreadScreen) recalcSizes() {
 	mw := s.mainWidth()
-	composerHeight := 3
-	if s.focus == focusComposer {
-		composerHeight = 5
-	}
-	statusHeight := 1
 	headerHeight := 2
-	msgHeight := s.height - composerHeight - statusHeight - headerHeight
+	msgHeight := s.height - headerHeight
+	if s.focus == focusComposer {
+		msgHeight -= s.composer.Height()
+	}
 	if msgHeight < 3 {
 		msgHeight = 3
 	}
 	s.messageList.SetSize(mw, msgHeight)
 	s.composer.SetWidth(mw)
-	s.statusBar.SetWidth(mw)
 	if s.profileVisible {
 		s.profilePanel.SetSize(s.profilePanelWidth(), s.height)
 	}

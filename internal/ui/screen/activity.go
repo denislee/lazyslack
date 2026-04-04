@@ -9,23 +9,27 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/user/lazyslack/internal/slack"
+	"github.com/user/lazyslack/internal/ui/component"
 )
 
 type ActivityScreen struct {
-	results   []slack.SearchResult
-	cursor    int
-	client    *slack.Client
-	formatter *slack.Formatter
-	loading   bool
-	err       string
-	width     int
-	height    int
+	results      []slack.SearchResult
+	cursor       int
+	scrollOffset int
+	statusBar    component.StatusBar
+	client       *slack.Client
+	formatter    *slack.Formatter
+	loading      bool
+	err          string
+	width        int
+	height       int
 }
 
 func NewActivityScreen(client *slack.Client, formatter *slack.Formatter) *ActivityScreen {
 	return &ActivityScreen{
 		client:    client,
 		formatter: formatter,
+		statusBar: component.NewStatusBar(),
 		loading:   true,
 	}
 }
@@ -67,7 +71,7 @@ func (s *ActivityScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		switch {
-		case key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+["))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+[", "h"))):
 			return s, func() tea.Msg { return GoBackMsg{} }
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
@@ -171,21 +175,31 @@ func (s *ActivityScreen) View() string {
 			Padding(1, 2).
 			Render("No mentions found"))
 	} else {
-		itemHeight := 4 // each result takes ~4 lines
-		availHeight := s.height - 3 // header + border
-		visible := availHeight / itemHeight
+		itemHeight := 3 // header + text + separator
+		availHeight := s.height - 2 // header bar (2 lines with border)
+		visible := (availHeight + 1) / itemHeight // last item doesn't need separator
 		if visible < 1 {
 			visible = 1
 		}
 
-		start := 0
-		if s.cursor >= visible {
-			start = s.cursor - visible + 1
+		// Adjust scroll offset to keep cursor visible
+		if s.cursor < s.scrollOffset {
+			s.scrollOffset = s.cursor
 		}
+		if s.cursor >= s.scrollOffset+visible {
+			s.scrollOffset = s.cursor - visible + 1
+		}
+		if s.scrollOffset < 0 {
+			s.scrollOffset = 0
+		}
+
+		start := s.scrollOffset
 		end := start + visible
 		if end > len(s.results) {
 			end = len(s.results)
 		}
+
+		contentWidth := s.width - 6
 
 		for i := start; i < end; i++ {
 			r := s.results[i]
@@ -202,13 +216,15 @@ func (s *ActivityScreen) View() string {
 
 			ts := s.formatter.FormatTimestamp(r.Message.Timestamp)
 
-			text := r.Message.Text
-			if len(text) > s.width-10 {
-				text = text[:s.width-10] + "..."
+			text := s.formatter.Format(r.Message.Text)
+			text = slack.StripANSI(text)
+			text = strings.ReplaceAll(text, "\n", " ")
+			if len(text) > contentWidth {
+				text = text[:contentWidth] + "…"
 			}
 
-			line := fmt.Sprintf("  %s  %s  %s\n  %s\n",
-				channel, username, ts, s.formatter.Format(text))
+			line := fmt.Sprintf("  %s  %s  %s\n  %s",
+				channel, username, ts, text)
 
 			if isSelected {
 				line = lipgloss.NewStyle().
@@ -222,13 +238,10 @@ func (s *ActivityScreen) View() string {
 			}
 
 			b.WriteString(line + "\n")
+			if i < end-1 {
+				b.WriteString("\n") // separator between items
+			}
 		}
-
-		// Position indicator
-		b.WriteString(lipgloss.NewStyle().
-			Foreground(lipgloss.Color("240")).
-			Padding(0, 2).
-			Render(fmt.Sprintf("%d/%d", s.cursor+1, len(s.results))))
 	}
 
 	return b.String()
@@ -238,6 +251,8 @@ func (s *ActivityScreen) SetSize(w, h int) {
 	s.width = w
 	s.height = h
 }
+
+func (s *ActivityScreen) SetStatusBarWidth(w int) { s.statusBar.SetWidth(w) }
 
 func (s *ActivityScreen) SelectedResult() *slack.SearchResult {
 	if len(s.results) > 0 && s.cursor < len(s.results) {
@@ -256,3 +271,13 @@ func (s *ActivityScreen) ShortHelp() []key.Binding {
 }
 
 func (s *ActivityScreen) InInsertMode() bool { return false }
+
+func (s *ActivityScreen) StatusBarView() string {
+	s.statusBar.SetChannel("Activity")
+	if len(s.results) > 0 {
+		s.statusBar.SetStatus(fmt.Sprintf("%d/%d", s.cursor+1, len(s.results)))
+	} else {
+		s.statusBar.SetStatus("")
+	}
+	return s.statusBar.View()
+}

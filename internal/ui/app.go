@@ -26,6 +26,7 @@ const (
 
 type App struct {
 	stack          []Screen
+	statusBar      component.StatusBar
 	quickSwitcher  *component.QuickSwitcher
 	showHelp       bool
 	sidebarVisible bool
@@ -51,6 +52,7 @@ func NewApp(client *slack.Client, cfg *config.Config) *App {
 
 	app := &App{
 		stack:          []Screen{mentionsScreen},
+		statusBar:      component.NewStatusBar(),
 		sidebarVisible: uiState.SidebarVisible,
 		client:         client,
 		formatter:      formatter,
@@ -151,21 +153,31 @@ func (a *App) sidebarWidth() int {
 	return w
 }
 
+func (a *App) contentHeight() int {
+	return max(a.height-1, 3) // reserve 1 line for status bar
+}
+
 func (a *App) resizeScreens() {
+	ch := a.contentHeight()
+	a.statusBar.SetWidth(a.width)
 	if a.sidebarVisible && len(a.stack) > 1 {
 		sw := a.sidebarWidth()
 		mainW := a.width - sw - 1 // 1 for border
 		if mainW < 10 {
 			mainW = 10
 		}
-		a.stack[0].SetSize(sw, a.height)
+		a.stack[0].SetSize(sw, ch)
 		for i := 1; i < len(a.stack); i++ {
-			a.stack[i].SetSize(mainW, a.height)
+			a.stack[i].SetSize(mainW, ch)
 		}
 	} else {
 		for _, s := range a.stack {
-			s.SetSize(a.width, a.height)
+			s.SetSize(a.width, ch)
 		}
+	}
+	// Status bar always spans full terminal width
+	for _, s := range a.stack {
+		s.SetStatusBarWidth(a.width)
 	}
 }
 
@@ -286,6 +298,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.stack = a.stack[:len(a.stack)-1]
 				}
 				chatScreen := screen.NewChatScreen(a.client, a.formatter, r.ChannelID, "#"+r.ChannelName, a.readTimestamps[r.ChannelID])
+				if r.Message.Timestamp != "" {
+					chatScreen.SetTargetMessage(r.Message.Timestamp)
+				}
 				cmd := a.pushScreen(chatScreen)
 				pollCmd := a.startChannelPolling(r.ChannelID)
 				return a, tea.Batch(cmd, pollCmd)
@@ -335,11 +350,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, tea.Batch(cmd, pollCmd)
 		}
 		if r.ChannelID != "" {
-			// Jump to channel from message search
+			// Jump to channel from message search, focusing on the specific message
 			for len(a.stack) > 1 {
 				a.stack = a.stack[:len(a.stack)-1]
 			}
 			chatScreen := screen.NewChatScreen(a.client, a.formatter, r.ChannelID, "#"+r.ChannelName, a.readTimestamps[r.ChannelID])
+			if r.MessageTS != "" {
+				chatScreen.SetTargetMessage(r.MessageTS)
+			}
 			cmd := a.pushScreen(chatScreen)
 			pollCmd := a.startChannelPolling(r.ChannelID)
 			return a, tea.Batch(cmd, pollCmd)
@@ -399,6 +417,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.stack = a.stack[:len(a.stack)-1]
 		}
 		chatScreen := screen.NewChatScreen(a.client, a.formatter, msg.ChannelID, "#"+msg.ChannelName, a.readTimestamps[msg.ChannelID])
+		if msg.MessageTS != "" {
+			chatScreen.SetTargetMessage(msg.MessageTS)
+		}
 		cmd := a.pushScreen(chatScreen)
 		pollCmd := a.startChannelPolling(msg.ChannelID)
 		return a, tea.Batch(cmd, pollCmd)
@@ -661,6 +682,8 @@ func (a *App) View() tea.View {
 		return tea.NewView("lazyslack")
 	}
 
+	ch := a.contentHeight()
+
 	var content string
 	if a.sidebarVisible && len(a.stack) > 1 {
 		sw := a.sidebarWidth()
@@ -672,7 +695,7 @@ func (a *App) View() tea.View {
 		sidebarStyle := lipgloss.NewStyle().
 			Width(sw).
 			MaxWidth(sw).
-			Height(a.height).
+			Height(ch).
 			BorderRight(true).
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderForeground(borderColor)
@@ -686,11 +709,45 @@ func (a *App) View() tea.View {
 
 	if a.showHelp {
 		content = component.NewHelpOverlay(a.width, a.height).View()
+		// Full-screen overlay, no status bar
+		v := tea.NewView(content)
+		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
+		v.WindowTitle = "lazyslack"
+		return v
 	} else if a.quickSwitcher != nil {
 		content = a.quickSwitcher.View()
+		// Full-screen overlay, no status bar
+		v := tea.NewView(content)
+		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
+		v.WindowTitle = "lazyslack"
+		return v
 	}
 
-	v := tea.NewView(content)
+	// Get status bar from focused screen, fall back to app-level bar
+	var statusView string
+	if a.sidebarVisible && a.sidebarFocus == focusSidebar && len(a.stack) > 1 {
+		statusView = a.stack[0].StatusBarView()
+	} else {
+		statusView = active.StatusBarView()
+	}
+	if statusView == "" {
+		statusView = a.statusBar.View()
+	}
+
+	// Ensure status bar always spans full terminal width
+	statusView = lipgloss.NewStyle().
+		Width(a.width).
+		MaxWidth(a.width).
+		Render(statusView)
+
+	// Force content to fill exactly contentHeight so the status bar is always at the bottom
+	content = lipgloss.NewStyle().Width(a.width).Height(ch).MaxHeight(ch).Render(content)
+
+	full := lipgloss.JoinVertical(lipgloss.Left, content, statusView)
+
+	v := tea.NewView(full)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	v.WindowTitle = "lazyslack"

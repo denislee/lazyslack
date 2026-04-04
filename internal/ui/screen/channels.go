@@ -156,12 +156,16 @@ func (s *ChannelsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	return s, cmd
 }
 
-func (s *ChannelsScreen) View() string {
+func (s *ChannelsScreen) StatusBarView() string {
 	if !s.lastPoll.IsZero() {
 		status := fmt.Sprintf("polled %s | %d unread", s.lastPoll.Format("15:04:05"), s.lastUnreadCount)
 		s.statusBar.SetStatus(status)
 	}
-	return s.channelList.View() + "\n" + s.statusBar.View()
+	return s.statusBar.View()
+}
+
+func (s *ChannelsScreen) View() string {
+	return s.channelList.View()
 }
 
 func (s *ChannelsScreen) SetLastPoll(t time.Time) {
@@ -171,9 +175,10 @@ func (s *ChannelsScreen) SetLastPoll(t time.Time) {
 func (s *ChannelsScreen) SetSize(w, h int) {
 	s.width = w
 	s.height = h
-	s.channelList.SetSize(w, h-1)
-	s.statusBar.SetWidth(w)
+	s.channelList.SetSize(w, h)
 }
+
+func (s *ChannelsScreen) SetStatusBarWidth(w int) { s.statusBar.SetWidth(w) }
 
 func (s *ChannelsScreen) SetChannels(channels []slack.Channel, pinnedIDs []string, readTimestamps map[string]string) {
 	unread := 0

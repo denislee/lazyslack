@@ -29,12 +29,16 @@ type ChatScreen struct {
 	composer       component.Composer
 	statusBar      component.StatusBar
 	reactionPicker *component.ReactionPicker
+	linkPicker     *component.LinkPicker
+	pager          *component.Pager
 	client         *slack.Client
 	formatter      *slack.Formatter
 	channelID      string
 	channelName    string
-	readTimestamp  string
-	focus          chatFocus
+	readTimestamp   string
+	targetMessageTS string // when set, fetch messages around this TS and focus on it
+	focus           chatFocus
+	editingTS       string // non-empty when editing an existing message
 	width          int
 	height         int
 }
@@ -56,29 +60,42 @@ func NewChatScreen(client *slack.Client, formatter *slack.Formatter, channelID, 
 	return s
 }
 
-func (s *ChatScreen) ChannelID() string    { return s.channelID }
+func (s *ChatScreen) ChannelID() string          { return s.channelID }
+func (s *ChatScreen) SetTargetMessage(ts string) { s.targetMessageTS = ts }
 func (s *ChatScreen) InInsertMode() bool {
-	return s.focus == focusComposer || s.reactionPicker != nil
+	return s.focus == focusComposer || s.reactionPicker != nil || s.linkPicker != nil || s.pager != nil
 }
 
 func (s *ChatScreen) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
-	// 1. Load from cache immediately
-	if cachedMsgs, err := s.client.Cache().LoadMessagesFromDisk(s.channelID); err == nil && len(cachedMsgs) > 0 {
+	if s.targetMessageTS != "" {
+		// Fetch messages around the target timestamp
+		targetTS := s.targetMessageTS
 		cmds = append(cmds, func() tea.Msg {
-			return chatMessagesMsg{channelID: s.channelID, messages: cachedMsgs, isCached: true}
+			msgs, err := s.client.GetMessagesAround(s.channelID, targetTS, 50)
+			if err != nil {
+				return chatErrorMsg{err: err}
+			}
+			return chatMessagesMsg{channelID: s.channelID, messages: msgs, targetTS: targetTS}
+		})
+	} else {
+		// 1. Load from cache immediately
+		if cachedMsgs, err := s.client.Cache().LoadMessagesFromDisk(s.channelID); err == nil && len(cachedMsgs) > 0 {
+			cmds = append(cmds, func() tea.Msg {
+				return chatMessagesMsg{channelID: s.channelID, messages: cachedMsgs, isCached: true}
+			})
+		}
+
+		// 2. Fetch fresh messages in background
+		cmds = append(cmds, func() tea.Msg {
+			msgs, err := s.client.GetMessages(s.channelID, 50, "")
+			if err != nil {
+				return chatErrorMsg{err: err}
+			}
+			return chatMessagesMsg{channelID: s.channelID, messages: msgs, isCached: false}
 		})
 	}
-
-	// 2. Fetch fresh messages in background
-	cmds = append(cmds, func() tea.Msg {
-		msgs, err := s.client.GetMessages(s.channelID, 50, "")
-		if err != nil {
-			return chatErrorMsg{err: err}
-		}
-		return chatMessagesMsg{channelID: s.channelID, messages: msgs, isCached: false}
-	})
 
 	return tea.Batch(cmds...)
 }
@@ -87,6 +104,7 @@ type chatMessagesMsg struct {
 	channelID string
 	messages  []slack.Message
 	isCached  bool
+	targetTS  string // when set, focus on this message instead of scrolling to bottom
 }
 
 type chatErrorMsg struct {
@@ -118,13 +136,24 @@ func (s *ChatScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 				current := s.messageList.Messages()
 				merged := s.client.MergeMessages(current, msg.messages)
 				s.messageList.SetMessages(merged)
-				s.messageList.ScrollToBottom()
+				if msg.targetTS != "" {
+					s.messageList.FocusOnTimestamp(msg.targetTS)
+				} else {
+					s.messageList.ScrollToBottom()
+				}
 			}
 		}
 		return s, nil
 
 	case chatErrorMsg:
 		s.statusBar.SetError(msg.err.Error())
+		return s, nil
+
+	case component.LinkPickedMsg:
+		s.linkPicker = nil
+		if msg.URL != "" {
+			_ = openBrowser(msg.URL)
+		}
 		return s, nil
 
 	case component.ReactionPickedMsg:
@@ -146,7 +175,28 @@ func (s *ChatScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		}
 		return s, nil
 
+	case component.PagerCloseMsg:
+		s.pager = nil
+		return s, nil
+
 	case tea.KeyPressMsg:
+		// Handle pager if open
+		if s.pager != nil {
+			p, cmd := s.pager.Update(msg)
+			s.pager = &p
+			return s, cmd
+		}
+
+		// Handle link picker if open
+		if s.linkPicker != nil {
+			if key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+[", "h"))) {
+				s.linkPicker = nil
+				return s, nil
+			}
+			cmd := s.linkPicker.Update(msg)
+			return s, cmd
+		}
+
 		// Handle reaction picker if open
 		if s.reactionPicker != nil {
 			if key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+["))) {
@@ -188,6 +238,8 @@ func (s *ChatScreen) checkReadStatus() tea.Cmd {
 }
 
 func (s *ChatScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
+	s.statusBar.SetStatus("")
+	s.statusBar.SetError("")
 	var cmds []tea.Cmd
 
 	switch {
@@ -212,7 +264,28 @@ func (s *ChatScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("i"))):
 		s.focus = focusComposer
+		s.editingTS = ""
 		return s, s.composer.Focus()
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("e"))):
+		focused := s.messageList.FocusedMessage()
+		if focused == nil {
+			return s, nil
+		}
+		if focused.UserID == s.client.GetSelfID() {
+			s.focus = focusComposer
+			s.editingTS = focused.Timestamp
+			s.composer.SetValue(focused.Text)
+			return s, s.composer.Focus()
+		}
+		// View mode for other people's messages
+		msgHeight := s.height - 2 // header only, no composer
+		if msgHeight < 3 {
+			msgHeight = 3
+		}
+		p := component.NewPager(focused.Text, s.width, msgHeight)
+		s.pager = &p
+		return s, nil
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("l"))):
 		focused := s.messageList.FocusedMessage()
@@ -237,12 +310,17 @@ func (s *ChatScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		if focused == nil {
 			return s, nil
 		}
-		// If message has URLs, open the first one in the browser
-		if urls := slack.ExtractURLs(focused.Text); len(urls) > 0 {
+		urls := focused.AllURLs()
+		if len(urls) == 1 {
 			_ = openBrowser(urls[0])
 			return s, nil
 		}
-		// Otherwise open thread if it has replies
+		if len(urls) > 1 {
+			picker := component.NewLinkPicker(focused, s.width-10)
+			s.linkPicker = &picker
+			return s, nil
+		}
+		// No URLs — open thread if it has replies
 		if focused.ReplyCount > 0 {
 			threadTS := focused.ThreadTS
 			if threadTS == "" {
@@ -329,7 +407,9 @@ func (s *ChatScreen) handleComposerKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("escape", "ctrl+["))):
 		s.focus = focusMessages
+		s.editingTS = ""
 		s.composer.Blur()
+		s.composer.Reset()
 		return s, nil
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
@@ -337,9 +417,25 @@ func (s *ChatScreen) handleComposerKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		if text == "" {
 			return s, nil
 		}
+		s.composer.SaveToHistory(text)
 		s.composer.Reset()
 		s.focus = focusMessages
 		s.composer.Blur()
+		editingTS := s.editingTS
+		s.editingTS = ""
+		if editingTS != "" {
+			return s, func() tea.Msg {
+				err := s.client.UpdateMessage(s.channelID, editingTS, text)
+				if err != nil {
+					return chatErrorMsg{err: err}
+				}
+				msgs, err := s.client.GetMessages(s.channelID, 50, "")
+				if err != nil {
+					return chatErrorMsg{err: err}
+				}
+				return chatMessagesMsg{channelID: s.channelID, messages: msgs}
+			}
+		}
 		return s, func() tea.Msg {
 			err := s.client.SendMessage(s.channelID, text)
 			if err != nil {
@@ -374,46 +470,72 @@ func (s *ChatScreen) View() string {
 
 	modeIndicator := ""
 	if s.focus == focusComposer {
-		modeIndicator = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("42")).
-			Render(" -- INSERT --")
+		if s.editingTS != "" {
+			modeIndicator = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("214")).
+				Render(" -- EDIT --")
+		} else {
+			modeIndicator = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("42")).
+				Render(" -- INSERT --")
+		}
 	}
 
 	messageView := s.messageList.View()
-	if s.reactionPicker != nil {
-		composerHeight := 3
-		if s.focus == focusComposer {
-			composerHeight = 5
+	if s.pager != nil {
+		messageView = s.pager.View()
+	} else if s.linkPicker != nil {
+		msgHeight := s.height - 2
+		if msgHeight < 3 {
+			msgHeight = 3
 		}
-		msgHeight := s.height - 2 - composerHeight - 1 // header, composer, status
+		messageView = lipgloss.Place(s.width, msgHeight, lipgloss.Center, lipgloss.Center, s.linkPicker.View())
+	} else if s.reactionPicker != nil {
+		msgHeight := s.height - 2
 		if msgHeight < 3 {
 			msgHeight = 3
 		}
 		messageView = lipgloss.Place(s.width, msgHeight, lipgloss.Center, lipgloss.Center, s.reactionPicker.View())
 	}
 
-	return headerBar + "\n" +
-		messageView + "\n" +
-		s.composer.View() + modeIndicator + "\n" +
-		s.statusBar.View()
+	s.recalcMessageListSize()
+
+	if s.pager != nil {
+		return headerBar + "\n" + messageView
+	}
+
+	if s.focus == focusComposer {
+		return headerBar + "\n" +
+			messageView + "\n" +
+			s.composer.View() + modeIndicator
+	}
+
+	return headerBar + "\n" + messageView
+}
+
+func (s *ChatScreen) StatusBarView() string {
+	return s.statusBar.View()
 }
 
 func (s *ChatScreen) SetSize(w, h int) {
 	s.width = w
 	s.height = h
-	composerHeight := 3
-	if s.focus == focusComposer {
-		composerHeight = 5
-	}
-	statusHeight := 1
+	s.composer.SetWidth(w)
+	s.recalcMessageListSize()
+}
+
+func (s *ChatScreen) SetStatusBarWidth(w int) { s.statusBar.SetWidth(w) }
+
+func (s *ChatScreen) recalcMessageListSize() {
 	headerHeight := 2
-	msgHeight := h - composerHeight - statusHeight - headerHeight
+	msgHeight := s.height - headerHeight
+	if s.focus == focusComposer {
+		msgHeight -= s.composer.Height()
+	}
 	if msgHeight < 3 {
 		msgHeight = 3
 	}
-	s.messageList.SetSize(w, msgHeight)
-	s.composer.SetWidth(w)
-	s.statusBar.SetWidth(w)
+	s.messageList.SetSize(s.width, msgHeight)
 }
 
 func (s *ChatScreen) SetMessages(msgs []slack.Message) {
@@ -433,6 +555,7 @@ func (s *ChatScreen) ShortHelp() []key.Binding {
 	}
 	return []key.Binding{
 		key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "compose")),
+		key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit/view")),
 		key.NewBinding(key.WithKeys("j/k"), key.WithHelp("j/k", "navigate")),
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open link/thread")),
 		key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "reply")),

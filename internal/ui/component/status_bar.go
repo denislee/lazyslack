@@ -32,24 +32,27 @@ func (s StatusBar) View() string {
 		Background(lipgloss.Color("236")).
 		Foreground(lipgloss.Color("252"))
 
+	bg := lipgloss.Color("236")
+
 	left := ""
 	if s.channel != "" {
-		left = lipgloss.NewStyle().Bold(true).Render(s.channel)
+		left = lipgloss.NewStyle().Bold(true).Background(bg).Render(s.channel)
 	}
 
 	right := ""
 	if s.err != "" {
-		right = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(s.err)
+		right = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Background(bg).Render(s.err)
 	} else if s.status != "" {
-		right = s.status
+		right = lipgloss.NewStyle().Background(bg).Foreground(lipgloss.Color("252")).Render(s.status)
 	} else if len(s.hints) > 0 {
-		right = strings.Join(s.hints, " | ")
+		right = lipgloss.NewStyle().Background(bg).Foreground(lipgloss.Color("252")).Render(strings.Join(s.hints, " | "))
 	}
 
 	unread := ""
 	if s.unreadCount > 0 {
 		unread = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("33")).
+			Background(bg).
 			Bold(true).
 			Render(fmt.Sprintf("%d unread", s.unreadCount))
 	}

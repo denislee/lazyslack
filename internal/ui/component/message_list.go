@@ -181,6 +181,19 @@ func (m *MessageList) ScrollToBottom() {
 	m.viewport.GotoBottom()
 }
 
+func (m *MessageList) FocusOnTimestamp(ts string) {
+	for i, msg := range m.messages {
+		if msg.Timestamp == ts {
+			m.focusedIndex = i
+			m.render()
+			m.ensureVisible()
+			return
+		}
+	}
+	// Fallback: scroll to bottom if timestamp not found
+	m.ScrollToBottom()
+}
+
 func (m *MessageList) Update(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	m.viewport, cmd = m.viewport.Update(msg)
@@ -276,6 +289,19 @@ func (m *MessageList) formatMessage(msg *slack.Message, isSelected bool) string 
 	var lines []string
 	lines = append(lines, headerLine)
 	lines = append(lines, body)
+
+	// Files/attachments
+	if len(msg.Files) > 0 {
+		for _, f := range msg.Files {
+			tag := "[file]"
+			if strings.HasPrefix(f.Mimetype, "image/") {
+				tag = "[image]"
+			}
+			tagStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+			nameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Italic(true)
+			lines = append(lines, fmt.Sprintf("  %s %s", tagStyle.Render(tag), nameStyle.Render(f.Name)))
+		}
+	}
 
 	// Reactions
 	if len(msg.Reactions) > 0 {

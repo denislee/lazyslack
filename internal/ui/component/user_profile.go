@@ -17,9 +17,11 @@ type profileField struct {
 type UserProfilePanel struct {
 	user         *slack.User
 	fields       []profileField
-	focusedIndex int
+	focusedIndex int // 0 = avatar (when present), 1+ = fields
+	scrollOffset int
 	width        int
 	height       int
+	avatarStr    string
 }
 
 func NewUserProfilePanel() UserProfilePanel {
@@ -29,10 +31,48 @@ func NewUserProfilePanel() UserProfilePanel {
 	}
 }
 
+func (p *UserProfilePanel) SetAvatar(s string) {
+	p.avatarStr = s
+}
+
+func (p *UserProfilePanel) hasAvatar() bool {
+	return p.avatarStr != ""
+}
+
+func (p *UserProfilePanel) totalItems() int {
+	n := len(p.fields)
+	if p.hasAvatar() {
+		n++
+	}
+	return n
+}
+
+func (p *UserProfilePanel) IsAvatarFocused() bool {
+	return p.hasAvatar() && p.focusedIndex == 0
+}
+
+// fieldIndex returns the index into p.fields for the current focusedIndex.
+// Returns -1 if avatar is focused.
+func (p *UserProfilePanel) fieldIndex() int {
+	if p.hasAvatar() {
+		return p.focusedIndex - 1
+	}
+	return p.focusedIndex
+}
+
+func (p *UserProfilePanel) AvatarURL() string {
+	if p.user != nil {
+		return p.user.ImageURL
+	}
+	return ""
+}
+
 func (p *UserProfilePanel) SetUser(user *slack.User) {
 	p.user = user
 	p.fields = p.fields[:0]
+	p.avatarStr = ""
 	p.focusedIndex = 0
+	p.scrollOffset = 0
 	if user == nil {
 		return
 	}
@@ -53,7 +93,7 @@ func (p *UserProfilePanel) SetUser(user *slack.User) {
 	if user.StatusText != "" || user.StatusEmoji != "" {
 		p.fields = append(p.fields, profileField{label: "Status", value: strings.TrimSpace(user.StatusEmoji + " " + user.StatusText)})
 	}
-	
+
 	emailVal := user.Email
 	if emailVal == "" {
 		emailVal = "Not provided"
@@ -72,9 +112,17 @@ func (p *UserProfilePanel) SetUser(user *slack.User) {
 func (p *UserProfilePanel) SetSize(w, h int) { p.width = w; p.height = h }
 
 func (p *UserProfilePanel) MoveDown() {
-	if len(p.fields) > 0 && p.focusedIndex < len(p.fields)-1 {
+	total := p.totalItems()
+	if total > 0 && p.focusedIndex < total-1 {
 		p.focusedIndex++
 	}
+}
+
+func (p *UserProfilePanel) UserID() string {
+	if p.user == nil {
+		return ""
+	}
+	return p.user.ID
 }
 
 func (p *UserProfilePanel) MoveUp() {
@@ -84,13 +132,17 @@ func (p *UserProfilePanel) MoveUp() {
 }
 
 func (p *UserProfilePanel) FocusedValue() string {
-	if len(p.fields) == 0 {
-		return ""
+	if p.IsAvatarFocused() {
+		return p.AvatarURL()
 	}
-	return p.fields[p.focusedIndex].value
+	fi := p.fieldIndex()
+	if fi >= 0 && fi < len(p.fields) {
+		return p.fields[fi].value
+	}
+	return ""
 }
 
-func (p UserProfilePanel) View() string {
+func (p *UserProfilePanel) View() string {
 	if p.user == nil || len(p.fields) == 0 {
 		return ""
 	}
@@ -121,7 +173,33 @@ func (p UserProfilePanel) View() string {
 		Render("Profile " + presenceStr)
 
 	var rows []string
+	lineCount := 0
+	focusedStartLine := 0 // first line of the focused item
+	focusedEndLine := 0   // last line of the focused item (exclusive)
+
 	rows = append(rows, header, "")
+	lineCount += 2
+
+	if p.hasAvatar() {
+		avatarLines := strings.Count(p.avatarStr, "\n") + 1
+		if p.IsAvatarFocused() {
+			focusedStartLine = lineCount
+			// Render avatar with selection indicator
+			indicator := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("33")).
+				Render("▸ Avatar")
+			rows = append(rows, indicator)
+			lineCount++
+			rows = append(rows, p.avatarStr)
+			lineCount += avatarLines
+			focusedEndLine = lineCount
+		} else {
+			rows = append(rows, p.avatarStr)
+			lineCount += avatarLines
+		}
+		rows = append(rows, "")
+		lineCount++
+	}
 
 	labelStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("245")).
@@ -135,22 +213,66 @@ func (p UserProfilePanel) View() string {
 		Bold(true).
 		Foreground(lipgloss.Color("255"))
 
+	fi := p.fieldIndex()
 	for i, f := range p.fields {
 		if i > 0 {
 			rows = append(rows, "")
+			lineCount++
+		}
+		if i == fi {
+			focusedStartLine = lineCount
 		}
 		rows = append(rows, labelStyle.Render(f.label))
-		if i == p.focusedIndex {
+		lineCount++
+		if i == fi {
 			indicator := lipgloss.NewStyle().
 				Foreground(lipgloss.Color("33")).
 				Render("▸ ")
 			rows = append(rows, indicator+selectedValueStyle.Render(truncate(f.value, valueWidth)))
+			focusedEndLine = lineCount + 1
 		} else {
 			rows = append(rows, "  "+valueStyle.Render(truncate(f.value, valueWidth)))
 		}
+		lineCount++
 	}
 
-	content := strings.Join(rows, "\n")
+	// Join all rows and split into individual lines for scrolling
+	allContent := strings.Join(rows, "\n")
+	lines := strings.Split(allContent, "\n")
+	totalLines := len(lines)
+
+	availHeight := p.height
+	if availHeight <= 0 {
+		availHeight = totalLines
+	}
+
+	if totalLines > availHeight {
+		// Ensure focused item is fully visible
+		if focusedStartLine < p.scrollOffset {
+			p.scrollOffset = focusedStartLine
+		}
+		if focusedEndLine > p.scrollOffset+availHeight {
+			p.scrollOffset = focusedEndLine - availHeight
+		}
+
+		maxOffset := totalLines - availHeight
+		if p.scrollOffset > maxOffset {
+			p.scrollOffset = maxOffset
+		}
+		if p.scrollOffset < 0 {
+			p.scrollOffset = 0
+		}
+
+		end := p.scrollOffset + availHeight
+		if end > totalLines {
+			end = totalLines
+		}
+		lines = lines[p.scrollOffset:end]
+	} else {
+		p.scrollOffset = 0
+	}
+
+	content := strings.Join(lines, "\n")
 
 	panel := lipgloss.NewStyle().
 		Width(w - 1).

@@ -327,6 +327,14 @@ func (f *Formatter) resolveAlertStatus(text string) string {
 	return sb.String()
 }
 
+var reANSI = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// StripANSI removes ANSI escape codes from a string.
+// Use before truncating formatted text to prevent style leaking.
+func StripANSI(s string) string {
+	return reANSI.ReplaceAllString(s, "")
+}
+
 func isAlphanumeric(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
