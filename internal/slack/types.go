@@ -14,16 +14,23 @@ type Channel struct {
 }
 
 type Message struct {
-	Timestamp  string
-	UserID     string
-	Username   string
-	Text       string
-	ThreadTS   string
-	ReplyCount int
-	Reactions  []Reaction
-	Edited     bool
-	Files      []File
-	IsBot      bool
+	Timestamp   string
+	UserID      string
+	Username    string
+	Text        string
+	ThreadTS    string
+	ReplyCount  int
+	Reactions   []Reaction
+	Edited      bool
+	EditedTS    string // Timestamp of the last edit
+	EditHistory []Edit // List of previous versions
+	Files       []File
+	IsBot       bool
+}
+
+type Edit struct {
+	Timestamp string
+	Text      string
 }
 
 type Reaction struct {

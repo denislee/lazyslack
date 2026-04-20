@@ -35,6 +35,28 @@ func (c *Client) MergeMessages(a, b []Message) []Message {
 		m[msg.Timestamp] = msg
 	}
 	for _, msg := range b {
+		existing, ok := m[msg.Timestamp]
+		if ok {
+			// Merge histories and detect new edits
+			msg.EditHistory = mergeHistory(existing.EditHistory, msg.EditHistory)
+
+			if msg.Edited && msg.EditedTS != "" && existing.Text != msg.Text {
+				// New version detected
+				prevTS := existing.EditedTS
+				if prevTS == "" {
+					prevTS = existing.Timestamp
+				}
+				if !hasEdit(msg.EditHistory, prevTS) {
+					msg.EditHistory = append(msg.EditHistory, Edit{
+						Timestamp: prevTS,
+						Text:      existing.Text,
+					})
+				}
+			} else if existing.Text == msg.Text && existing.EditHistory != nil && msg.EditHistory == nil {
+				// No text change, just preserve existing history if new is empty
+				msg.EditHistory = existing.EditHistory
+			}
+		}
 		m[msg.Timestamp] = msg
 	}
 
@@ -49,6 +71,36 @@ func (c *Client) MergeMessages(a, b []Message) []Message {
 	})
 
 	return merged
+}
+
+func mergeHistory(a, b []Edit) []Edit {
+	seen := make(map[string]bool)
+	var merged []Edit
+	for _, e := range a {
+		if !seen[e.Timestamp+e.Text] {
+			merged = append(merged, e)
+			seen[e.Timestamp+e.Text] = true
+		}
+	}
+	for _, e := range b {
+		if !seen[e.Timestamp+e.Text] {
+			merged = append(merged, e)
+			seen[e.Timestamp+e.Text] = true
+		}
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Timestamp < merged[j].Timestamp
+	})
+	return merged
+}
+
+func hasEdit(history []Edit, ts string) bool {
+	for _, e := range history {
+		if e.Timestamp == ts {
+			return true
+		}
+	}
+	return false
 }
 
 func friendlyError(err error) error {
@@ -576,17 +628,24 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 		}
 	}
 
+	editedTS := ""
+	if msg.Edited != nil {
+		editedTS = msg.Edited.Timestamp
+	}
+
 	return Message{
-		Timestamp:  msg.Timestamp,
-		UserID:     msg.User,
-		Username:   username,
-		Text:       text,
-		ThreadTS:   msg.ThreadTimestamp,
-		ReplyCount: msg.ReplyCount,
-		Reactions:  reactions,
-		Edited:     msg.Edited != nil,
-		Files:      files,
-		IsBot:      msg.BotID != "",
+		Timestamp:   msg.Timestamp,
+		UserID:      msg.User,
+		Username:    username,
+		Text:        text,
+		ThreadTS:    msg.ThreadTimestamp,
+		ReplyCount:  msg.ReplyCount,
+		Reactions:   reactions,
+		Edited:      msg.Edited != nil,
+		EditedTS:    editedTS,
+		EditHistory: nil, // Will be populated during MergeMessages
+		Files:       files,
+		IsBot:       msg.BotID != "",
 	}
 }
 

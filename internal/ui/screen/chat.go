@@ -1,6 +1,7 @@
 package screen
 
 import (
+	"fmt"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -267,23 +268,49 @@ func (s *ChatScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		s.editingTS = ""
 		return s, s.composer.Focus()
 
-	case key.Matches(msg, key.NewBinding(key.WithKeys("e"))):
+	case key.Matches(msg, key.NewBinding(key.WithKeys("e", "H"))):
 		focused := s.messageList.FocusedMessage()
 		if focused == nil {
 			return s, nil
 		}
-		if focused.UserID == s.client.GetSelfID() {
+		
+		isHistoryKey := msg.String() == "H"
+		
+		if focused.UserID == s.client.GetSelfID() && !isHistoryKey {
 			s.focus = focusComposer
 			s.editingTS = focused.Timestamp
 			s.composer.SetValue(focused.Text)
 			return s, s.composer.Focus()
 		}
-		// View mode for other people's messages
-		msgHeight := s.height - 2 // header only, no composer
+		
+		// View mode (for others' messages or if H was pressed)
+		content := s.formatter.Format(focused.Text)
+		if len(focused.EditHistory) > 0 {
+			var h strings.Builder
+			h.WriteString(lipgloss.NewStyle().Bold(true).Underline(true).Render("Edit History:"))
+			h.WriteString("\n\n")
+			for i, edit := range focused.EditHistory {
+				ts := s.formatter.FormatTimestamp(edit.Timestamp)
+				h.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(fmt.Sprintf("[%s]", ts)))
+				h.WriteString("\n")
+				h.WriteString(s.formatter.Format(edit.Text))
+				h.WriteString("\n\n")
+				if i < len(focused.EditHistory)-1 {
+					h.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("237")).Render(strings.Repeat("─", s.width-4)))
+					h.WriteString("\n\n")
+				}
+			}
+			h.WriteString(lipgloss.NewStyle().Bold(true).Underline(true).Render("Current Version:"))
+			h.WriteString("\n\n")
+			h.WriteString(s.formatter.Format(focused.Text))
+			content = h.String()
+		}
+
+		msgHeight := s.height - 2
 		if msgHeight < 3 {
 			msgHeight = 3
 		}
-		p := component.NewPager(focused.Text, s.width, msgHeight)
+		p := component.NewPager(content, s.width, msgHeight)
 		s.pager = &p
 		return s, nil
 
@@ -556,6 +583,7 @@ func (s *ChatScreen) ShortHelp() []key.Binding {
 	return []key.Binding{
 		key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "compose")),
 		key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit/view")),
+		key.NewBinding(key.WithKeys("H"), key.WithHelp("H", "history")),
 		key.NewBinding(key.WithKeys("j/k"), key.WithHelp("j/k", "navigate")),
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open link/thread")),
 		key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "reply")),

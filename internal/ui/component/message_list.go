@@ -263,6 +263,9 @@ func (m *MessageList) formatMessage(msg *slack.Message, isSelected bool) string 
 	}
 
 	ts := m.formatter.FormatTimestamp(msg.Timestamp)
+	if msg.Edited {
+		ts += lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(" (edited)")
+	}
 
 	header := presenceIcon + nameStyle.Render(username)
 	if msg.ReplyCount > 0 && (msg.ThreadTS == "" || msg.ThreadTS == msg.Timestamp) {
