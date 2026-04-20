@@ -413,50 +413,26 @@ func (s *ThreadScreen) handleNormalKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 		s.editingTS = ""
 		return s, s.composer.Focus()
 
-	case key.Matches(msg, key.NewBinding(key.WithKeys("e", "H"))):
+	case key.Matches(msg, key.NewBinding(key.WithKeys("e"))):
 		focused := s.messageList.FocusedMessage()
 		if focused == nil {
 			return s, nil
 		}
-		
-		isHistoryKey := msg.String() == "H"
-		
-		if focused.UserID == s.client.GetSelfID() && !isHistoryKey {
+		if focused.UserID == s.client.GetSelfID() {
 			s.focus = focusComposer
 			s.editingTS = focused.Timestamp
 			s.composer.SetValue(focused.Text)
 			return s, s.composer.Focus()
 		}
-		
-		// View mode (for others' messages or if H was pressed)
-		content := s.formatter.Format(focused.Text)
-		if len(focused.EditHistory) > 0 {
-			var h strings.Builder
-			h.WriteString(lipgloss.NewStyle().Bold(true).Underline(true).Render("Edit History:"))
-			h.WriteString("\n\n")
-			for i, edit := range focused.EditHistory {
-				ts := s.formatter.FormatTimestamp(edit.Timestamp)
-				h.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(fmt.Sprintf("[%s]", ts)))
-				h.WriteString("\n")
-				h.WriteString(s.formatter.Format(edit.Text))
-				h.WriteString("\n\n")
-				if i < len(focused.EditHistory)-1 {
-					h.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("237")).Render(strings.Repeat("─", s.mainWidth()-4)))
-					h.WriteString("\n\n")
-				}
-			}
-			h.WriteString(lipgloss.NewStyle().Bold(true).Underline(true).Render("Current Version:"))
-			h.WriteString("\n\n")
-			h.WriteString(s.formatter.Format(focused.Text))
-			content = h.String()
-		}
+		s.pager = s.newMessagePager(focused, false)
+		return s, nil
 
-		msgHeight := s.height - 2
-		if msgHeight < 3 {
-			msgHeight = 3
+	case key.Matches(msg, key.NewBinding(key.WithKeys("H"))):
+		focused := s.messageList.FocusedMessage()
+		if focused == nil {
+			return s, nil
 		}
-		p := component.NewPager(content, s.mainWidth(), msgHeight)
-		s.pager = &p
+		s.pager = s.newMessagePager(focused, true)
 		return s, nil
 	}
 
@@ -635,4 +611,21 @@ func (s *ThreadScreen) ShortHelp() []key.Binding {
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open link")),
 		key.NewBinding(key.WithKeys("escape", "ctrl+[", "h"), key.WithHelp("esc/h", "back")),
 	}
+}
+
+// newMessagePager builds a Pager showing the focused message. If showHistory is
+// true and the message has edit history, prior versions are rendered above it.
+func (s *ThreadScreen) newMessagePager(focused *slack.Message, showHistory bool) *component.Pager {
+	var content string
+	if showHistory {
+		content = renderMessageWithHistory(s.formatter, focused, s.mainWidth())
+	} else {
+		content = s.formatter.Format(focused.Text)
+	}
+	msgHeight := s.height - 2
+	if msgHeight < 3 {
+		msgHeight = 3
+	}
+	p := component.NewPager(content, s.mainWidth(), msgHeight)
+	return &p
 }

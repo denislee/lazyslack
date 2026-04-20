@@ -29,15 +29,22 @@ var slackErrors = map[string]string{
 	"too_many_reactions":                  "Too many reactions on this message",
 }
 
+// MergeMessages merges two message lists keyed by timestamp, with `b` taking
+// precedence for overlapping entries. When an incoming message has been edited
+// since the cached copy, the cached text is appended to the edit history.
+//
+// Note: if a message is edited more than once between two polls we can only
+// recover the most recent prior version — Slack's conversations.history endpoint
+// returns only the current text plus an "edited" timestamp, not a full revision
+// log. Intermediate versions are lost.
 func (c *Client) MergeMessages(a, b []Message) []Message {
-	m := make(map[string]Message)
+	m := make(map[string]Message, len(a)+len(b))
 	for _, msg := range a {
 		m[msg.Timestamp] = msg
 	}
 	for _, msg := range b {
 		existing, ok := m[msg.Timestamp]
 		if ok {
-			// Merge histories and detect new edits
 			msg.EditHistory = mergeHistory(existing.EditHistory, msg.EditHistory)
 
 			if msg.Edited && msg.EditedTS != "" && existing.Text != msg.Text {
@@ -74,18 +81,18 @@ func (c *Client) MergeMessages(a, b []Message) []Message {
 }
 
 func mergeHistory(a, b []Edit) []Edit {
-	seen := make(map[string]bool)
-	var merged []Edit
+	seen := make(map[Edit]bool, len(a)+len(b))
+	merged := make([]Edit, 0, len(a)+len(b))
 	for _, e := range a {
-		if !seen[e.Timestamp+e.Text] {
+		if !seen[e] {
 			merged = append(merged, e)
-			seen[e.Timestamp+e.Text] = true
+			seen[e] = true
 		}
 	}
 	for _, e := range b {
-		if !seen[e.Timestamp+e.Text] {
+		if !seen[e] {
 			merged = append(merged, e)
-			seen[e.Timestamp+e.Text] = true
+			seen[e] = true
 		}
 	}
 	sort.Slice(merged, func(i, j int) bool {
