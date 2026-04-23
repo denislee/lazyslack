@@ -62,8 +62,28 @@ func (s *ThreadScreen) InInsertMode() bool {
 	return s.focus == focusComposer || s.reactionPicker != nil || s.linkPicker != nil || s.pager != nil
 }
 
-func (s *ThreadScreen) SetMessages(msgs []slack.Message) {
+// SetMessages applies new replies from a poll. If the user was at the bottom,
+// advance the thread's readTimestamp so passive reading keeps the thread
+// marked-as-read in the in-memory thread map.
+func (s *ThreadScreen) SetMessages(msgs []slack.Message) tea.Cmd {
+	wasAtBottom := s.messageList.IsAtBottom()
 	s.messageList.SetMessages(msgs)
+	if !wasAtBottom || len(msgs) == 0 {
+		return nil
+	}
+	latest := msgs[len(msgs)-1].Timestamp
+	if latest == "" || latest <= s.readTimestamp {
+		return nil
+	}
+	s.readTimestamp = latest
+	s.messageList.SetReadTimestamp(latest)
+	return func() tea.Msg {
+		return UpdateReadTimestampMsg{
+			ChannelID: s.channelID,
+			ThreadTS:  s.threadTS,
+			Timestamp: latest,
+		}
+	}
 }
 
 func (s *ThreadScreen) Init() tea.Cmd {
@@ -207,6 +227,7 @@ func (s *ThreadScreen) checkReadStatus() tea.Cmd {
 		return func() tea.Msg {
 			return UpdateReadTimestampMsg{
 				ChannelID: s.channelID,
+				ThreadTS:  s.threadTS,
 				Timestamp: s.readTimestamp,
 			}
 		}

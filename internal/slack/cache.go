@@ -112,6 +112,13 @@ func (c *Cache) SetChannels(channels []Channel) {
 			if existing.LatestTS > newCh.LatestTS {
 				newCh.LatestTS = existing.LatestTS
 			}
+			// conversations.list doesn't reliably populate unread fields. If
+			// the fresh entry lacks LastReadTS, trust whatever conversations.info
+			// last wrote into the cache instead of clobbering it with zeros.
+			if newCh.LastReadTS == "" && existing.LastReadTS != "" {
+				newCh.UnreadCount = existing.UnreadCount
+				newCh.LastReadTS = existing.LastReadTS
+			}
 		}
 		c.channels[id] = &newCh
 	}
@@ -121,6 +128,41 @@ func (c *Cache) GetChannel(id string) *Channel {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.channels[id]
+}
+
+// SetChannelUnread overwrites the unread-tracking fields for a channel under
+// the write lock. Used by enrichment paths that fetch authoritative values
+// from conversations.info.
+func (c *Cache) SetChannelUnread(id string, unreadCount int, lastReadTS, latestTS string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	existing, ok := c.channels[id]
+	if !ok {
+		return
+	}
+	updated := *existing
+	updated.UnreadCount = unreadCount
+	updated.LastReadTS = lastReadTS
+	if latestTS != "" {
+		updated.LatestTS = latestTS
+	}
+	c.channels[id] = &updated
+}
+
+// AdvanceChannelLatestTS bumps a channel's LatestTS under the write lock, but
+// only if the incoming timestamp is newer. Returns true when the cache was
+// actually updated so the caller can skip unnecessary UI refreshes.
+func (c *Cache) AdvanceChannelLatestTS(id, ts string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	existing, ok := c.channels[id]
+	if !ok || ts <= existing.LatestTS {
+		return false
+	}
+	updated := *existing
+	updated.LatestTS = ts
+	c.channels[id] = &updated
+	return true
 }
 
 func (c *Cache) GetAllChannels() []Channel {

@@ -251,13 +251,10 @@ func (c *Client) GetUnreadCounts(ids []string) ([]Channel, error) {
 
 	c.enrichWithUnreadCounts(channels, ids)
 
-	// Update cache with enriched data
+	// Update cache with enriched data under the cache's write lock to avoid
+	// racing with readers (e.g. sidebar rendering via GetAllChannels).
 	for _, ch := range channels {
-		if cached := c.cache.GetChannel(ch.ID); cached != nil {
-			cached.UnreadCount = ch.UnreadCount
-			cached.LastReadTS = ch.LastReadTS
-			cached.LatestTS = ch.LatestTS
-		}
+		c.cache.SetChannelUnread(ch.ID, ch.UnreadCount, ch.LastReadTS, ch.LatestTS)
 	}
 
 	return channels, nil

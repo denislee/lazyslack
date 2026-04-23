@@ -91,6 +91,13 @@ func (m *MessageList) Messages() []slack.Message {
 	return m.messages
 }
 
+// IsAtBottom reports whether the viewport's focus is at (or past) the last
+// message, which is the passive-reading state where new incoming messages
+// should count as already-read.
+func (m *MessageList) IsAtBottom() bool {
+	return len(m.messages) == 0 || m.focusedIndex >= len(m.messages)-1
+}
+
 func (m *MessageList) MoveUp() {
 	if m.focusedIndex == -1 {
 		if len(m.messages) > 0 {

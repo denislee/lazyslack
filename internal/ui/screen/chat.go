@@ -21,6 +21,9 @@ const (
 
 type UpdateReadTimestampMsg struct {
 	ChannelID string
+	// ThreadTS is set when the update originates from a ThreadScreen. Empty
+	// means the update is for the channel's message list.
+	ThreadTS  string
 	Timestamp string
 }
 
@@ -540,8 +543,25 @@ func (s *ChatScreen) recalcMessageListSize() {
 	s.messageList.SetSize(s.width, msgHeight)
 }
 
-func (s *ChatScreen) SetMessages(msgs []slack.Message) {
+// SetMessages applies new messages from a poll. If the user was at the bottom
+// (passive reading), the local readTimestamp is advanced to the latest message
+// so the sidebar doesn't mark the actively-viewed channel as unread. Returns a
+// Cmd so the App can propagate the advance to the sidebar / Slack server.
+func (s *ChatScreen) SetMessages(msgs []slack.Message) tea.Cmd {
+	wasAtBottom := s.messageList.IsAtBottom()
 	s.messageList.SetMessages(msgs)
+	if !wasAtBottom || len(msgs) == 0 {
+		return nil
+	}
+	latest := msgs[len(msgs)-1].Timestamp
+	if latest == "" || latest <= s.readTimestamp {
+		return nil
+	}
+	s.readTimestamp = latest
+	s.messageList.SetReadTimestamp(latest)
+	return func() tea.Msg {
+		return UpdateReadTimestampMsg{ChannelID: s.channelID, Timestamp: latest}
+	}
 }
 
 func (s *ChatScreen) SetUnreadCount(n int) {
